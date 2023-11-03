@@ -5,7 +5,10 @@ from typing import List
 
 from localstack.aws.api import CommonServiceException, RequestContext, handler
 from localstack.aws.api.cloudwatch import (
+<<<<<<< HEAD
     AccountId,
+=======
+>>>>>>> 8644c6964 (put_metric_alarm and describe_alarms for v2 cloudwatch)
     ActionPrefix,
     AlarmName,
     AlarmNamePrefix,
@@ -13,6 +16,7 @@ from localstack.aws.api.cloudwatch import (
     AlarmTypes,
     AmazonResourceName,
     CloudwatchApi,
+<<<<<<< HEAD
     DashboardBody,
     DashboardName,
     DashboardNamePrefix,
@@ -56,6 +60,15 @@ from localstack.aws.api.cloudwatch import (
     StateReasonData,
     StateValue,
     Statistics,
+=======
+    DescribeAlarmsOutput,
+    InvalidParameterValueException,
+    ListTagsForResourceOutput,
+    MaxRecords,
+    NextToken,
+    PutMetricAlarmInput,
+    StateValue,
+>>>>>>> 8644c6964 (put_metric_alarm and describe_alarms for v2 cloudwatch)
     TagKeyList,
     TagList,
     TagResourceOutput,
@@ -65,19 +78,27 @@ from localstack.aws.api.cloudwatch import (
 from localstack.aws.connect import connect_to
 from localstack.http import Request
 from localstack.services.cloudwatch.alarm_scheduler import AlarmScheduler
+<<<<<<< HEAD
 from localstack.services.cloudwatch.cloudwatch_database_helper import CloudwatchDatabase
 from localstack.services.cloudwatch.models import (
     CloudWatchStore,
     LocalStackAlarm,
     LocalStackDashboard,
+=======
+from localstack.services.cloudwatch.models import (
+    CloudWatchStore,
+>>>>>>> 8644c6964 (put_metric_alarm and describe_alarms for v2 cloudwatch)
     LocalStackMetricAlarm,
     cloudwatch_stores,
 )
 from localstack.services.edge import ROUTER
 from localstack.services.plugins import SERVICE_PLUGINS, ServiceLifecycleHook
 from localstack.utils.aws import arns
+<<<<<<< HEAD
 from localstack.utils.collections import PaginatedList
 from localstack.utils.json import CustomEncoder as JSONEncoder
+=======
+>>>>>>> 8644c6964 (put_metric_alarm and describe_alarms for v2 cloudwatch)
 from localstack.utils.sync import poll_condition
 from localstack.utils.tagging import TaggingService
 from localstack.utils.threads import start_worker_thread
@@ -91,10 +112,15 @@ LOG = logging.getLogger(__name__)
 
 
 class ValidationError(CommonServiceException):
+<<<<<<< HEAD
+=======
+    # TODO: check this error against AWS (doesn't exist in the API)
+>>>>>>> 8644c6964 (put_metric_alarm and describe_alarms for v2 cloudwatch)
     def __init__(self, message: str):
         super().__init__("ValidationError", message, 400, True)
 
 
+<<<<<<< HEAD
 def _validate_parameters_for_put_metric_data(metric_data: MetricData) -> None:
     for index, metric_item in enumerate(metric_data):
         indexplusone = index + 1
@@ -113,6 +139,8 @@ def _validate_parameters_for_put_metric_data(metric_data: MetricData) -> None:
         # TODO: check for other validations
 
 
+=======
+>>>>>>> 8644c6964 (put_metric_alarm and describe_alarms for v2 cloudwatch)
 class CloudwatchProvider(CloudwatchApi, ServiceLifecycleHook):
     """
     Cloudwatch provider.
@@ -126,6 +154,10 @@ class CloudwatchProvider(CloudwatchApi, ServiceLifecycleHook):
         self.alarm_scheduler: AlarmScheduler = None
         self.store = None
         self.cloudwatch_database = CloudwatchDatabase()
+
+    @staticmethod
+    def get_store(account_id: str, region: str) -> CloudWatchStore:
+        return cloudwatch_stores[account_id][region]
 
     @staticmethod
     def get_store(account_id: str, region: str) -> CloudWatchStore:
@@ -174,6 +206,7 @@ class CloudwatchProvider(CloudwatchApi, ServiceLifecycleHook):
         """
 
         for alarm_name in alarm_names:
+<<<<<<< HEAD
             alarm_arn = arns.cloudwatch_alarm_arn(
                 alarm_name, account_id=context.account_id, region_name=context.region
             )  # obtain alarm ARN from alarm name
@@ -303,6 +336,10 @@ class CloudwatchProvider(CloudwatchApi, ServiceLifecycleHook):
                     data["service"],
                     action,
                 )
+=======
+            alarm_arn = arns.cloudwatch_alarm_arn(alarm_name)  # obtain alarm ARN from alarm name
+            self.alarm_scheduler.delete_scheduler_for_alarm(alarm_arn)
+>>>>>>> 8644c6964 (put_metric_alarm and describe_alarms for v2 cloudwatch)
 
     def get_raw_metrics(self, request: Request):
         # TODO this needs to be read from the database
@@ -409,6 +446,7 @@ class CloudwatchProvider(CloudwatchApi, ServiceLifecycleHook):
     ) -> TagResourceOutput:
         self.tags.tag_resource(resource_arn, tags)
         return TagResourceOutput()
+<<<<<<< HEAD
 
     def put_dashboard(
         self, context: RequestContext, dashboard_name: DashboardName, dashboard_body: DashboardBody
@@ -651,3 +689,5 @@ class CloudwatchProvider(CloudwatchApi, ServiceLifecycleHook):
             alarm = store.Alarms.get(alarm_arn)
             if alarm:
                 alarm.alarm["ActionsEnabled"] = enabled
+=======
+>>>>>>> 8644c6964 (put_metric_alarm and describe_alarms for v2 cloudwatch)
