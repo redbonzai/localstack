@@ -2,7 +2,6 @@
 import logging
 import traceback
 from collections import defaultdict
-from functools import lru_cache
 from typing import Any, Dict, Union
 
 from botocore.model import OperationModel, ServiceModel
@@ -17,9 +16,8 @@ from ..chain import CompositeResponseHandler, ExceptionHandler, Handler, Handler
 from ..client import parse_response, parse_service_exception
 from ..protocol.parser import RequestParser, create_parser
 from ..protocol.serializer import create_serializer
-from ..protocol.service_router import determine_aws_service_name
+from ..protocol.service_router import determine_aws_service_model
 from ..skeleton import Skeleton, create_skeleton
-from ..spec import load_service
 
 LOG = logging.getLogger(__name__)
 
@@ -30,18 +28,14 @@ class ServiceNameParser(Handler):
     """
 
     def __call__(self, chain: HandlerChain, context: RequestContext, response: Response):
-        service = determine_aws_service_name(context.request)
+        service = determine_aws_service_model(context.request)
 
         if not service:
             return
 
-        context.service = self.get_service_model(service)
+        context.service = service
         headers = context.request.headers
         headers["x-localstack-tgt-api"] = service  # TODO: probably no longer needed
-
-    @lru_cache()
-    def get_service_model(self, service: str) -> ServiceModel:
-        return load_service(service)
 
 
 class ServiceRequestParser(Handler):
@@ -63,17 +57,8 @@ class ServiceRequestParser(Handler):
 
         return self.parse_and_enrich(context)
 
-    def get_parser(self, service: ServiceModel):
-        name = service.service_name
-
-        if name in self.parsers:
-            return self.parsers[name]
-
-        self.parsers[name] = create_parser(service)
-        return self.parsers[name]
-
     def parse_and_enrich(self, context: RequestContext):
-        parser = self.get_parser(context.service)
+        parser = create_parser(context.service)
         operation, instance = parser.parse(context.request)
 
         # enrich context
