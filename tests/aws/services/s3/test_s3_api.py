@@ -1,5 +1,6 @@
 import json
 from operator import itemgetter
+from urllib.parse import urlencode
 
 import pytest
 from botocore.exceptions import ClientError
@@ -537,8 +538,12 @@ class TestS3ObjectCRUD:
         snapshot.match("get-100-200", e.value.response)
 
 
+@markers.snapshot.skip_snapshot_verify(
+    condition=is_legacy_v2_provider, paths=["$..ServerSideEncryption"]
+)
 class TestS3Multipart:
     # TODO: write a validated test for UploadPartCopy preconditions
+
     @markers.aws.validated
     @pytest.mark.xfail(
         condition=config.LEGACY_V2_S3_PROVIDER,
@@ -622,6 +627,46 @@ class TestS3Multipart:
                     CopySourceRange=f"bytes={src_range}",
                 )
             snapshot.match(f"upload-part-copy-range-exc-{src_range}", e.value.response)
+
+    @markers.aws.validated
+    @markers.snapshot.skip_snapshot_verify(
+        # Not always present depending on the region
+        paths=["$..Owner.DisplayName"],
+    )
+    def test_upload_part_copy_no_copy_source_range(self, aws_client, s3_bucket, snapshot):
+        """
+        upload_part_copy should not require CopySourceRange to be populated
+        """
+
+        snapshot.add_transformer(
+            [
+                snapshot.transform.key_value("Bucket", reference_replacement=False),
+                snapshot.transform.key_value("Location"),
+                snapshot.transform.key_value("UploadId"),
+                snapshot.transform.key_value("DisplayName", reference_replacement=False),
+                snapshot.transform.key_value("ID", reference_replacement=False),
+            ]
+        )
+
+        src_key = "src-key"
+        content = "0123456789"
+        put_src_object = aws_client.s3.put_object(Bucket=s3_bucket, Key=src_key, Body=content)
+        snapshot.match("put-src-object", put_src_object)
+        key = "test-upload-part-copy"
+        create_multipart = aws_client.s3.create_multipart_upload(Bucket=s3_bucket, Key=key)
+        snapshot.match("create-multipart", create_multipart)
+        upload_id = create_multipart["UploadId"]
+
+        copy_source_key = f"{s3_bucket}/{src_key}"
+        parts = []
+        upload_part_copy = aws_client.s3.upload_part_copy(
+            Bucket=s3_bucket, UploadId=upload_id, Key=key, PartNumber=1, CopySource=copy_source_key
+        )
+        snapshot.match("upload-part-copy", upload_part_copy)
+        parts.append({"ETag": upload_part_copy["CopyPartResult"]["ETag"], "PartNumber": 1})
+
+        list_parts = aws_client.s3.list_parts(Bucket=s3_bucket, Key=key, UploadId=upload_id)
+        snapshot.match("list-parts", list_parts)
 
 
 class TestS3BucketVersioning:
@@ -1069,8 +1114,16 @@ class TestS3BucketObjectTagging:
         )
         object_key = "test-version-tagging"
         version_ids = []
+        v1_tags = {"test_tag": "tagv1"}
         for i in range(2):
-            put_obj = aws_client.s3.put_object(Bucket=s3_bucket, Key=object_key, Body=f"test-{i}")
+            if i == 0:
+                put_obj = aws_client.s3.put_object(
+                    Bucket=s3_bucket, Key=object_key, Body=f"test-{i}", Tagging=urlencode(v1_tags)
+                )
+            else:
+                put_obj = aws_client.s3.put_object(
+                    Bucket=s3_bucket, Key=object_key, Body=f"test-{i}"
+                )
             snapshot.match(f"put-obj-{i}", put_obj)
             version_ids.append(put_obj["VersionId"])
 
@@ -1088,6 +1141,11 @@ class TestS3BucketObjectTagging:
         get_bucket_tags = aws_client.s3.get_object_tagging(Bucket=s3_bucket, Key=object_key)
         snapshot.match("get-object-tags-current-version", get_bucket_tags)
 
+        get_bucket_tags = aws_client.s3.get_object_tagging(
+            Bucket=s3_bucket, Key=object_key, VersionId=version_id_1
+        )
+        snapshot.match("get-object-tags-previous-version", get_bucket_tags)
+
         tag_set_2 = {"TagSet": [{"Key": "tag1", "Value": "tag1"}]}
         # test by specifying a VersionId to Version1
         put_bucket_tags = aws_client.s3.put_object_tagging(
@@ -1099,7 +1157,7 @@ class TestS3BucketObjectTagging:
         get_bucket_tags = aws_client.s3.get_object_tagging(
             Bucket=s3_bucket, Key=object_key, VersionId=version_id_1
         )
-        snapshot.match("get-object-tags-previous-version", get_bucket_tags)
+        snapshot.match("get-object-tags-previous-version-again", get_bucket_tags)
 
         # Put a DeleteMarker on top of the stack
         delete_current = aws_client.s3.delete_object(Bucket=s3_bucket, Key=object_key)

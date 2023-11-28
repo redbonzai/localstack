@@ -6,7 +6,7 @@ import logging
 from collections import defaultdict
 from operator import itemgetter
 from secrets import token_urlsafe
-from typing import IO, Union
+from typing import IO, Optional, Union
 from urllib import parse as urlparse
 
 from localstack import config
@@ -198,6 +198,7 @@ from localstack.aws.api.s3 import (
     WebsiteConfiguration,
 )
 from localstack.aws.handlers import preprocess_request, serve_custom_service_request_handlers
+from localstack.constants import AWS_REGION_US_EAST_1
 from localstack.services.edge import ROUTER
 from localstack.services.plugins import ServiceLifecycleHook
 from localstack.services.s3.codec import AwsChunkedDecoder
@@ -1692,6 +1693,8 @@ class S3Provider(S3Api, ServiceLifecycleHook):
             response["VersionId"] = s3_object.version_id
 
         if s3_object.parts:
+            # TODO: implements ObjectParts, this is basically a simplified `ListParts` call on the object, we might
+            #  need to store more data about the Parts once we implement checksums for them
             response["ObjectParts"] = GetObjectAttributesParts(TotalPartsCount=len(s3_object.parts))
 
         return response
@@ -1964,7 +1967,10 @@ class S3Provider(S3Api, ServiceLifecycleHook):
 
         source_range = request.get("CopySourceRange")
         # TODO implement copy source IF (done in ASF provider)
-        range_data = parse_copy_source_range_header(source_range, src_s3_object.size)
+
+        range_data: Optional[ObjectRange] = None
+        if source_range:
+            range_data = parse_copy_source_range_header(source_range, src_s3_object.size)
 
         s3_part = S3Part(part_number=part_number)
 
@@ -2513,7 +2519,7 @@ class S3Provider(S3Api, ServiceLifecycleHook):
 
         validate_tag_set(tagging["TagSet"], type_set="object")
 
-        key_id = get_unique_key_id(bucket, key, version_id)
+        key_id = get_unique_key_id(bucket, key, s3_object.version_id)
         # remove the previous tags before setting the new ones, it overwrites the whole TagSet
         store.TAGS.tags.pop(key_id, None)
         store.TAGS.tag_resource(key_id, tags=tagging["TagSet"])
@@ -2548,9 +2554,9 @@ class S3Provider(S3Api, ServiceLifecycleHook):
             e.Key = f"{bucket}/{key}"
             raise e
 
-        tag_set = store.TAGS.list_tags_for_resource(get_unique_key_id(bucket, key, version_id))[
-            "Tags"
-        ]
+        tag_set = store.TAGS.list_tags_for_resource(
+            get_unique_key_id(bucket, key, s3_object.version_id)
+        )["Tags"]
         response = GetObjectTaggingOutput(TagSet=tag_set)
         if s3_object.version_id:
             response["VersionId"] = s3_object.version_id
@@ -3278,9 +3284,14 @@ class S3Provider(S3Api, ServiceLifecycleHook):
                 TargetBucket=target_bucket_name,
             )
 
-        if target_s3_bucket.bucket_region != s3_bucket.bucket_region:
+        source_bucket_region = s3_bucket.bucket_region
+        if target_s3_bucket.bucket_region != source_bucket_region:
             raise CrossLocationLoggingProhibitted(
                 "Cross S3 location logging not allowed. ",
+                TargetBucketLocation=target_s3_bucket.bucket_region,
+            ) if source_bucket_region == AWS_REGION_US_EAST_1 else CrossLocationLoggingProhibitted(
+                "Cross S3 location logging not allowed. ",
+                SourceBucketLocation=source_bucket_region,
                 TargetBucketLocation=target_s3_bucket.bucket_region,
             )
 

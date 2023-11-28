@@ -262,7 +262,7 @@ class TestSNSPublishCrud:
         if is_aws_cloud():
             endpoint_url = f"https://sns.{TEST_AWS_REGION_NAME}.amazonaws.com"
         else:
-            endpoint_url = config.get_edge_url()
+            endpoint_url = config.internal_service_url()
 
         response = client.post(
             endpoint_url,
@@ -386,6 +386,44 @@ class TestSNSPublishCrud:
             aws_client.sns.publish(TopicArn=fake_arn, Message=message)
 
         snapshot.match("error", e.value.response)
+
+    @markers.aws.validated
+    def test_topic_publish_another_region(
+        self, sns_create_topic, snapshot, aws_client, aws_client_factory
+    ):
+        # create the topic in the default region, so that it's easier to clean up with the fixture
+        topic_arn = sns_create_topic()["TopicArn"]
+
+        # create a client in another region
+        sns_client_region_2 = aws_client_factory.get_client(
+            service_name="sns", region_name=SECONDARY_TEST_AWS_REGION_NAME
+        )
+
+        message = "This is a test message"
+
+        # test to send a message with the client from the same region
+        response = aws_client.sns.publish(TopicArn=topic_arn, Message=message)
+        snapshot.match("success", response)
+
+        # test to send from the second region client
+        with pytest.raises(ClientError) as e:
+            sns_client_region_2.publish(TopicArn=topic_arn, Message=message)
+
+        snapshot.match("error", e.value.response)
+
+        # test to send batch from the second region client
+        with pytest.raises(ClientError) as e:
+            sns_client_region_2.publish_batch(
+                TopicArn=topic_arn,
+                PublishBatchRequestEntries=[
+                    {
+                        "Id": "1",
+                        "Message": message,
+                    }
+                ],
+            )
+
+        snapshot.match("error-batch", e.value.response)
 
     @markers.aws.validated
     def test_publish_non_existent_target(self, sns_create_topic, snapshot, aws_client):
@@ -4466,7 +4504,7 @@ class TestSNSRetrospectionEndpoints:
 
         retry(check_message, retries=PUBLICATION_RETRIES, sleep=PUBLICATION_TIMEOUT)
 
-        msgs_url = config.get_edge_url() + PLATFORM_ENDPOINT_MSGS_ENDPOINT
+        msgs_url = config.internal_service_url() + PLATFORM_ENDPOINT_MSGS_ENDPOINT
         api_contents = requests.get(
             msgs_url, params={"region": TEST_AWS_REGION_NAME, "accountId": TEST_AWS_ACCOUNT_ID}
         ).json()
@@ -4568,7 +4606,7 @@ class TestSNSRetrospectionEndpoints:
 
         retry(check_message, retries=PUBLICATION_RETRIES, sleep=PUBLICATION_TIMEOUT)
 
-        msgs_url = config.get_edge_url() + SMS_MSGS_ENDPOINT
+        msgs_url = config.internal_service_url() + SMS_MSGS_ENDPOINT
         api_contents = requests.get(
             msgs_url, params={"region": TEST_AWS_REGION_NAME, "accountId": TEST_AWS_ACCOUNT_ID}
         ).json()
@@ -4655,7 +4693,7 @@ class TestSNSRetrospectionEndpoints:
 
         # we won't confirm the subscription, to simulate an external provider that wouldn't be able to access LocalStack
         # try to access the internal to confirm the Token is there
-        tokens_base_url = config.get_edge_url() + SUBSCRIPTION_TOKENS_ENDPOINT
+        tokens_base_url = config.internal_service_url() + SUBSCRIPTION_TOKENS_ENDPOINT
         api_contents = requests.get(f"{tokens_base_url}/{subscription_arn}").json()
         assert api_contents["subscription_token"] == token
         assert api_contents["subscription_arn"] == subscription_arn

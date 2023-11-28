@@ -187,12 +187,13 @@ from localstack.utils.collections import get_safe
 from localstack.utils.patch import patch
 from localstack.utils.strings import short_uid
 from localstack.utils.time import parse_timestamp
+from localstack.utils.urls import localstack_host
 
 LOG = logging.getLogger(__name__)
 
 os.environ[
     "MOTO_S3_CUSTOM_ENDPOINTS"
-] = "s3.localhost.localstack.cloud:4566,s3.localhost.localstack.cloud"
+] = f"s3.{localstack_host().host_and_port()},s3.{localstack_host().host}"
 
 MOTO_CANONICAL_USER_ID = "75aa57f09aa0c8caeab4f8c24e99d10f8e7faeebf76c078efc7c6caea54ba06a"
 # max file size for S3 objects kept in memory (500 KB by default)
@@ -1652,9 +1653,14 @@ class S3Provider(S3Api, ServiceLifecycleHook):
                 TargetBucket=target_bucket_name,
             )
 
-        if target_bucket.region_name != moto_bucket.region_name:
+        source_bucket_region = moto_bucket.region_name
+        if target_bucket.region_name != source_bucket_region:
             raise CrossLocationLoggingProhibitted(
                 "Cross S3 location logging not allowed. ",
+                TargetBucketLocation=target_bucket.region_name,
+            ) if source_bucket_region == AWS_REGION_US_EAST_1 else CrossLocationLoggingProhibitted(
+                "Cross S3 location logging not allowed. ",
+                SourceBucketLocation=source_bucket_region,
                 TargetBucketLocation=target_bucket.region_name,
             )
 

@@ -10,7 +10,6 @@ from moto.core import BaseModel
 from moto.core.base_backend import InstanceTrackerMeta
 
 from localstack import config, constants
-from localstack.aws.accounts import get_aws_account_id
 from localstack.constants import (
     AWS_REGION_US_EAST_1,
     ENV_DEV,
@@ -174,13 +173,19 @@ def cleanup_resources():
             )
 
 
+def gateway_listen_ports_info() -> str:
+    """Example: http port [4566,443]"""
+    gateway_listen_ports = [gw_listen.port for gw_listen in config.GATEWAY_LISTEN]
+    return f"{config.get_protocol()} port {gateway_listen_ports}"
+
+
 def log_startup_message(service):
-    LOG.info("Starting mock %s service on %s ...", service, config.gateway_listen_ports_info())
+    LOG.info("Starting mock %s service on %s ...", service, gateway_listen_ports_info())
 
 
 def check_aws_credentials():
     # Setup AWS environment vars, these are used by Boto when LocalStack makes internal cross-service calls
-    os.environ["AWS_ACCESS_KEY_ID"] = get_aws_account_id()
+    os.environ["AWS_ACCESS_KEY_ID"] = constants.DEFAULT_AWS_ACCOUNT_ID
     os.environ["AWS_SECRET_ACCESS_KEY"] = constants.INTERNAL_AWS_SECRET_ACCESS_KEY
     session = boto3.Session()
     credentials = session.get_credentials()

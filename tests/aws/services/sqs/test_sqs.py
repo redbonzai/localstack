@@ -12,7 +12,6 @@ from botocore.exceptions import ClientError
 from localstack import config
 from localstack.aws.api.lambda_ import Runtime
 from localstack.constants import (
-    DEFAULT_AWS_ACCOUNT_ID,
     SECONDARY_TEST_AWS_ACCESS_KEY_ID,
     SECONDARY_TEST_AWS_ACCOUNT_ID,
     SECONDARY_TEST_AWS_SECRET_ACCESS_KEY,
@@ -27,7 +26,8 @@ from localstack.services.sqs.provider import MAX_NUMBER_OF_MESSAGES
 from localstack.services.sqs.utils import parse_queue_url
 from localstack.testing.pytest import markers
 from localstack.testing.snapshots.transformer import GenericTransformer
-from localstack.utils.aws import arns, aws_stack
+from localstack.utils.aws import arns
+from localstack.utils.aws.request_context import mock_aws_request_headers
 from localstack.utils.common import poll_condition, retry, short_uid, to_str
 from localstack.utils.urls import localstack_host
 from tests.aws.services.lambda_.functions import lambda_integration
@@ -933,6 +933,21 @@ class TestSqsProvider:
         assert len(messages) == 1
 
     @markers.aws.validated
+    def test_change_message_visibility_after_visibility_timeout_expiration(
+        self, snapshot, sqs_create_queue, aws_client
+    ):
+        queue_url = sqs_create_queue(Attributes={"VisibilityTimeout": "1"})
+        aws_client.sqs.send_message(QueueUrl=queue_url, MessageBody="test")
+        response = aws_client.sqs.receive_message(QueueUrl=queue_url)
+        receipt = response["Messages"][0]["ReceiptHandle"]
+        time.sleep(2)
+        # VisibiltyTimeout was 1 and has now expired
+        response = aws_client.sqs.change_message_visibility(
+            QueueUrl=queue_url, ReceiptHandle=receipt, VisibilityTimeout=2
+        )
+        snapshot.match("visibility_timeout_expired", response)
+
+    @markers.aws.validated
     def test_receive_message_with_visibility_timeout_updates_timeout(
         self, sqs_create_queue, aws_client
     ):
@@ -1092,7 +1107,7 @@ class TestSqsProvider:
         queue_name = f"queue-{short_uid()}"
         sqs_create_queue(QueueName=queue_name)
 
-        headers = aws_stack.mock_aws_request_headers(
+        headers = mock_aws_request_headers(
             "sqs", aws_access_key_id=TEST_AWS_ACCESS_KEY_ID, region_name=TEST_AWS_REGION_NAME
         )
         payload = f"Action=GetQueueUrl&QueueName={queue_name}"
@@ -1111,8 +1126,8 @@ class TestSqsProvider:
 
         queue_name = f"queue-{short_uid()}"
 
-        edge_url = config.get_edge_url()
-        headers = aws_stack.mock_aws_request_headers(
+        edge_url = config.internal_service_url()
+        headers = mock_aws_request_headers(
             "sqs", aws_access_key_id=TEST_AWS_ACCESS_KEY_ID, region_name=TEST_AWS_REGION_NAME
         )
         port = 12345
@@ -2267,19 +2282,14 @@ class TestSqsProvider:
         assert receive_result["Messages"][0]["MessageAttributes"] == attributes
 
     @markers.aws.validated
-    def test_send_message_with_empty_string_attribute(self, sqs_queue, aws_client):
+    def test_send_message_with_empty_string_attribute(self, sqs_queue, aws_client, snapshot):
         with pytest.raises(ClientError) as e:
             aws_client.sqs.send_message(
                 QueueUrl=sqs_queue,
                 MessageBody="test",
                 MessageAttributes={"ErrorDetails": {"StringValue": "", "DataType": "String"}},
             )
-
-        assert e.value.response["Error"] == {
-            "Type": "Sender",
-            "Code": "InvalidParameterValue",
-            "Message": "Message (user) attribute 'ErrorDetails' must contain a non-empty value of type 'String'.",
-        }
+        snapshot.match("empty-string-attr", e.value.response)
 
     @markers.aws.validated
     def test_send_message_with_invalid_string_attributes(self, sqs_create_queue, aws_client):
@@ -2611,15 +2621,15 @@ class TestSqsProvider:
 
     @pytest.mark.xfail
     @markers.aws.validated
-    def test_set_unsupported_attribute_fifo(self, sqs_create_queue, aws_client):
+    def test_set_unsupported_attribute_fifo(self, sqs_create_queue, aws_client, snapshot):
         # TODO: behaviour diverges from AWS
         queue_name = f"queue-{short_uid()}"
         queue_url = sqs_create_queue(QueueName=queue_name)
-        with pytest.raises(Exception) as e:
+        with pytest.raises(ClientError) as e:
             aws_client.sqs.set_queue_attributes(
                 QueueUrl=queue_url, Attributes={"FifoQueue": "true"}
             )
-        e.match("InvalidAttributeName")
+        snapshot.match("invalid-attr-name-1", e.value.response)
 
         fifo_queue_name = f"queue-{short_uid()}.fifo"
         fifo_queue_url = sqs_create_queue(
@@ -2628,11 +2638,11 @@ class TestSqsProvider:
         aws_client.sqs.set_queue_attributes(
             QueueUrl=fifo_queue_url, Attributes={"FifoQueue": "true"}
         )
-        with pytest.raises(Exception) as e:
+        with pytest.raises(ClientError) as e:
             aws_client.sqs.set_queue_attributes(
                 QueueUrl=fifo_queue_url, Attributes={"FifoQueue": "false"}
             )
-        e.match("InvalidAttributeValue")
+        snapshot.match("invalid-attr-name-2", e.value.response)
 
     @markers.aws.validated
     def test_fifo_queue_send_multiple_messages_multiple_single_receives(
@@ -2800,7 +2810,7 @@ class TestSqsProvider:
         if os.environ.get("TEST_TARGET") == "AWS_CLOUD":
             endpoint_url = "https://queue.amazonaws.com"
         else:
-            endpoint_url = config.get_edge_url()
+            endpoint_url = config.internal_service_url()
 
         # assert that AWS has some sort of content negotiation for query GET requests, even if not `json` protocol
         response = client.get(
@@ -2924,24 +2934,43 @@ class TestSqsProvider:
         assert int(send_result_2["SequenceNumber"]) < int(send_result_3["SequenceNumber"])
 
     @markers.aws.validated
-    def test_posting_to_fifo_requires_deduplicationid_group_id(self, sqs_create_queue, aws_client):
+    @markers.snapshot.skip_snapshot_verify(paths=["$..Error.Detail"])
+    def test_posting_to_fifo_requires_deduplicationid_group_id(
+        self, sqs_create_queue, aws_client, snapshot
+    ):
         fifo_queue_name = f"queue-{short_uid()}.fifo"
         queue_url = sqs_create_queue(QueueName=fifo_queue_name, Attributes={"FifoQueue": "true"})
         message_content = f"test{short_uid()}"
         dedup_id = f"fifo_dedup-{short_uid()}"
         group_id = f"fifo_group-{short_uid()}"
 
-        with pytest.raises(Exception) as e:
+        with pytest.raises(ClientError) as e:
             aws_client.sqs.send_message(
                 QueueUrl=queue_url, MessageBody=message_content, MessageGroupId=group_id
             )
-        e.match("InvalidParameterValue")
+        snapshot.match("invalid-parameter-value", e.value.response)
 
-        with pytest.raises(Exception) as e:
+        with pytest.raises(ClientError) as e:
             aws_client.sqs.send_message(
                 QueueUrl=queue_url, MessageBody=message_content, MessageDeduplicationId=dedup_id
             )
-        e.match("MissingParameter")
+        snapshot.match("missing-parameter", e.value.response)
+
+        # TODO: maybe create a special test, but these 2 exceptions are special in JSON protocol with QueryErrorCode
+        # they append 'Exception' at the end of the error code
+        # validate that the `query` protocol does not do that
+
+        with pytest.raises(ClientError) as e:
+            aws_client.sqs_query.send_message(
+                QueueUrl=queue_url, MessageBody=message_content, MessageGroupId=group_id
+            )
+        snapshot.match("invalid-parameter-value-query", e.value.response)
+
+        with pytest.raises(ClientError) as e:
+            aws_client.sqs_query.send_message(
+                QueueUrl=queue_url, MessageBody=message_content, MessageDeduplicationId=dedup_id
+            )
+        snapshot.match("missing-parameter-query", e.value.response)
 
     @markers.aws.validated
     def test_posting_to_queue_via_queue_name(self, sqs_create_queue, aws_client):
@@ -3696,6 +3725,27 @@ class TestSqsProvider:
             aws_client.sqs.remove_permission(QueueUrl=sqs_queue, Label="crossaccountpermission2")
         snapshot.match("get-queue-policy-attribute-delete-non-existent-label", e.value.response)
 
+    @markers.aws.validated
+    @markers.snapshot.skip_snapshot_verify(paths=["$..Error.Detail"])
+    def test_non_existent_queue(self, aws_client, sqs_create_queue, sqs_queue_exists, snapshot):
+        queue_name = f"test-queue-{short_uid()}"
+        queue_url = sqs_create_queue(QueueName=queue_name)
+        aws_client.sqs.delete_queue(QueueUrl=queue_url)
+        assert poll_condition(lambda: not sqs_queue_exists(queue_url), timeout=5)
+
+        with pytest.raises(ClientError) as e:
+            aws_client.sqs.get_queue_attributes(QueueUrl=queue_url)
+        snapshot.match("queue-does-not-exist", e.value.response)
+
+        # validate both the client exception handling in boto and GetQueueUrl
+        with pytest.raises(aws_client.sqs.exceptions.QueueDoesNotExist) as e:
+            aws_client.sqs.get_queue_url(QueueName=queue_name)
+        snapshot.match("queue-does-not-exist-url", e.value.response)
+
+        with pytest.raises(ClientError) as e:
+            aws_client.sqs_query.get_queue_attributes(QueueUrl=queue_url)
+        snapshot.match("queue-does-not-exist-query", e.value.response)
+
 
 @pytest.fixture()
 def sqs_http_client(aws_http_client_factory):
@@ -3721,7 +3771,12 @@ class TestSqsQueryApi:
         assert queue_url.split("/")[-1] in response.text
 
     @markers.aws.only_localstack
-    def test_get_queue_attributes_works_without_authparams(self, sqs_create_queue):
+    @pytest.mark.parametrize("strategy", ["standard", "domain", "path"])
+    def test_get_queue_attributes_works_without_authparams(
+        self, monkeypatch, sqs_create_queue, strategy
+    ):
+        monkeypatch.setattr(config, "SQS_ENDPOINT_STRATEGY", strategy)
+
         queue_url = sqs_create_queue()
         response = requests.get(
             queue_url,
@@ -3971,6 +4026,7 @@ class TestSqsQueryApi:
             params={
                 "Action": "GetQueueUrl",
                 "QueueName": queue_url.split("/")[-1],
+                "QueueOwnerAWSAccountId": TEST_AWS_ACCOUNT_ID,
             },
         )
         assert f"<QueueUrl>{queue_url}</QueueUrl>" in response.text
@@ -3992,6 +4048,7 @@ class TestSqsQueryApi:
             params={
                 "Action": "GetQueueUrl",
                 "QueueName": queue2_url.split("/")[-1],
+                "QueueOwnerAWSAccountId": TEST_AWS_ACCOUNT_ID,
             },
         )
         assert f"<QueueUrl>{queue2_url}</QueueUrl>" in response.text
@@ -4138,6 +4195,27 @@ class TestSqsQueryApi:
     # TODO: write tests for making POST requests (not clear how signing would work without custom code)
     #  https://docs.aws.amazon.com/AWSSimpleQueueService/latest/SQSDeveloperGuide/sqs-making-api-requests.html#structure-post-request
 
+    @markers.aws.validated
+    def test_send_message_via_queue_url_with_json_protocol(
+        self,
+        sqs_create_queue,
+        aws_client_factory,
+        snapshot,
+    ):
+        queue_url = sqs_create_queue()
+        # that is what the PHP SDK is doing in a way, sending the request against the queue URL directly when `json`
+        # protocol should target the root path
+        sqs_client = aws_client_factory(
+            endpoint_url=queue_url,
+        ).sqs
+
+        response = sqs_client.receive_message(QueueUrl=queue_url, WaitTimeSeconds=1)
+        assert (
+            response["ResponseMetadata"]["HTTPHeaders"]["content-type"]
+            == "application/x-amz-json-1.0"
+        )
+        snapshot.match("receive-json-on-queue-url", response)
+
 
 class TestSQSMultiAccounts:
     @pytest.mark.parametrize("strategy", ["standard", "domain", "path"])
@@ -4183,7 +4261,7 @@ class TestSQSMultiAccounts:
         queue_name = f"test-queue-cross-account-{short_uid()}"
         queue_url = sqs_create_queue(QueueName=queue_name)
         account_id, region_name, queue_name_from_url = parse_queue_url(queue_url)
-        assert account_id == DEFAULT_AWS_ACCOUNT_ID
+        assert account_id == TEST_AWS_ACCOUNT_ID
         assert region_name == TEST_AWS_REGION_NAME
         assert queue_name_from_url == queue_name
 
