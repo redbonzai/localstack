@@ -52,8 +52,10 @@ def cloudwatch():
 @aws_provider(api="cloudwatch", name="v1")
 def cloudwatch_v1():
     from localstack.services.cloudwatch.provider import CloudwatchProvider
+    from localstack.services.moto import MotoFallbackDispatcher
 
     provider = CloudwatchProvider()
+
     return Service.for_provider(provider, dispatch_table_factory=MotoFallbackDispatcher)
 
 
@@ -62,15 +64,7 @@ def cloudwatch_v2():
     from localstack.services.cloudwatch.provider_v2 import CloudwatchProvider
 
     provider = CloudwatchProvider()
-    return Service.for_provider(provider, dispatch_table_factory=MotoFallbackDispatcher)
-
-
-@aws_provider(api="cloudwatch", name="v2")
-def cloudwatch_v2():
-    from localstack.services.cloudwatch.provider_v2 import CloudwatchProvider
-
-    provider = CloudwatchProvider()
-    return Service.for_provider(provider, dispatch_table_factory=MotoFallbackDispatcher)
+    return Service.for_provider(provider)
 
 
 @aws_provider()
