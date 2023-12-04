@@ -56,13 +56,6 @@ from localstack.aws.api.cloudwatch import (
     StateReasonData,
     StateValue,
     Statistics,
-    DescribeAlarmsOutput,
-    InvalidParameterValueException,
-    ListTagsForResourceOutput,
-    MaxRecords,
-    NextToken,
-    PutMetricAlarmInput,
-    StateValue,
     TagKeyList,
     TagList,
     TagResourceOutput,
@@ -77,7 +70,6 @@ from localstack.services.cloudwatch.models import (
     CloudWatchStore,
     LocalStackAlarm,
     LocalStackDashboard,
-    CloudWatchStore,
     LocalStackMetricAlarm,
     cloudwatch_stores,
 )
@@ -93,6 +85,7 @@ from localstack.utils.time import timestamp_millis
 
 PATH_GET_RAW_METRICS = "/_aws/cloudwatch/metrics/raw"
 MOTO_INITIAL_UNCHECKED_REASON = "Unchecked: Initial alarm creation"
+LIST_METRICS_MAX_RESULTS = 500
 
 
 LOG = logging.getLogger(__name__)
@@ -126,7 +119,6 @@ def _validate_parameters_for_put_metric_data(metric_data: MetricData) -> None:
                 )
 
 
-
 class CloudwatchProvider(CloudwatchApi, ServiceLifecycleHook):
     """
     Cloudwatch provider.
@@ -140,10 +132,6 @@ class CloudwatchProvider(CloudwatchApi, ServiceLifecycleHook):
         self.alarm_scheduler: AlarmScheduler = None
         self.store = None
         self.cloudwatch_database = CloudwatchDatabase()
-
-    @staticmethod
-    def get_store(account_id: str, region: str) -> CloudWatchStore:
-        return cloudwatch_stores[account_id][region]
 
     @staticmethod
     def get_store(account_id: str, region: str) -> CloudWatchStore:
@@ -233,14 +221,16 @@ class CloudwatchProvider(CloudwatchApi, ServiceLifecycleHook):
             if query_result.get("messages"):
                 messages.extend(query_result.get("messages"))
 
-
             # TODO: Fix this. AWS sometimes returns the metric name as label, sometimes is metric with stat
-            query_result["label"] = query.get("Label") or f'{query["MetricStat"]["Metric"]["MetricName"]} {query["MetricStat"]["Stat"]}'
+            query_result["label"] = (
+                query.get("Label")
+                or f'{query["MetricStat"]["Metric"]["MetricName"]} {query["MetricStat"]["Stat"]}'
+            )
 
             # Paginate
             aliases_list = PaginatedList(query_result.get("datapoints", {}).items())
             page, nxt = aliases_list.get_page(
-                lambda metric_result: metric_result.get("Id"),
+                lambda metric_result: "",
                 next_token=next_token,
                 page_size=limit,
             )
@@ -517,7 +507,14 @@ class CloudwatchProvider(CloudwatchApi, ServiceLifecycleHook):
             }
             for metric in result.get("metrics", [])
         ]
-        return ListMetricsOutput(Metrics=metrics, NextToken=None)
+
+        aliases_list = PaginatedList(metrics)
+        page, nxt = aliases_list.get_page(
+            lambda metric: metric.get("MetricName"),
+            next_token=next_token,
+            page_size=LIST_METRICS_MAX_RESULTS,
+        )
+        return ListMetricsOutput(Metrics=page, NextToken=nxt)
 
     def get_metric_statistics(
         self,

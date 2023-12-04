@@ -4,7 +4,7 @@ from typing import Dict, List
 from moto.cloudwatch.models import CloudWatchBackend as MotoCloudWatchBackend
 from moto.cloudwatch.models import cloudwatch_backends as moto_cloudwatch_backend
 
-from localstack.aws.api.cloudwatch import CompositeAlarm, MetricAlarm, StateValue, DashboardBody
+from localstack.aws.api.cloudwatch import CompositeAlarm, DashboardBody, MetricAlarm, StateValue
 from localstack.services.stores import (
     AccountRegionBundle,
     BaseStore,
