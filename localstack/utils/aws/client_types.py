@@ -111,7 +111,9 @@ class TypedServiceClientFactory(abc.ABC):
     appconfig: Union["AppConfigClient", "MetadataRequestInjector[AppConfigClient]"]
     appconfigdata: Union["AppConfigDataClient", "MetadataRequestInjector[AppConfigDataClient]"]
     appsync: Union["AppSyncClient", "MetadataRequestInjector[AppSyncClient]"]
-    application_autoscaling: Union["ApplicationAutoScalingClient", "MetadataRequestInjector[ApplicationAutoScalingClient]"]
+    application_autoscaling: Union[
+        "ApplicationAutoScalingClient", "MetadataRequestInjector[ApplicationAutoScalingClient]"
+    ]
     athena: Union["AthenaClient", "MetadataRequestInjector[AthenaClient]"]
     autoscaling: Union["AutoScalingClient", "MetadataRequestInjector[AutoScalingClient]"]
     # application_autoscaling: Union["AutoScalingClient", "MetadataRequestInjector[AutoScalingClient]"]
