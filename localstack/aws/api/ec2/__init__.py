@@ -2730,6 +2730,11 @@ class SSEType(str):
     none = "none"
 
 
+class SecurityGroupReferencingSupportValue(str):
+    enable = "enable"
+    disable = "disable"
+
+
 class SelfServicePortal(str):
     enabled = "enabled"
     disabled = "disabled"
@@ -3440,6 +3445,7 @@ class AcceptTransitGatewayVpcAttachmentRequest(ServiceRequest):
 
 class TransitGatewayVpcAttachmentOptions(TypedDict, total=False):
     DnsSupport: Optional[DnsSupportValue]
+    SecurityGroupReferencingSupport: Optional[SecurityGroupReferencingSupportValue]
     Ipv6Support: Optional[Ipv6SupportValue]
     ApplianceModeSupport: Optional[ApplianceModeSupportValue]
 
@@ -8227,6 +8233,7 @@ class TransitGatewayRequestOptions(TypedDict, total=False):
     DefaultRouteTablePropagation: Optional[DefaultRouteTablePropagationValue]
     VpnEcmpSupport: Optional[VpnEcmpSupportValue]
     DnsSupport: Optional[DnsSupportValue]
+    SecurityGroupReferencingSupport: Optional[SecurityGroupReferencingSupportValue]
     MulticastSupport: Optional[MulticastSupportValue]
     TransitGatewayCidrBlocks: Optional[TransitGatewayCidrBlockStringList]
 
@@ -8248,6 +8255,7 @@ class TransitGatewayOptions(TypedDict, total=False):
     PropagationDefaultRouteTableId: Optional[String]
     VpnEcmpSupport: Optional[VpnEcmpSupportValue]
     DnsSupport: Optional[DnsSupportValue]
+    SecurityGroupReferencingSupport: Optional[SecurityGroupReferencingSupportValue]
     MulticastSupport: Optional[MulticastSupportValue]
 
 
@@ -8343,6 +8351,7 @@ class CreateTransitGatewayRouteTableResult(TypedDict, total=False):
 
 class CreateTransitGatewayVpcAttachmentRequestOptions(TypedDict, total=False):
     DnsSupport: Optional[DnsSupportValue]
+    SecurityGroupReferencingSupport: Optional[SecurityGroupReferencingSupportValue]
     Ipv6Support: Optional[Ipv6SupportValue]
     ApplianceModeSupport: Optional[ApplianceModeSupportValue]
 
@@ -12718,6 +12727,7 @@ class SecurityGroupReference(TypedDict, total=False):
     GroupId: Optional[String]
     ReferencingVpcId: Optional[String]
     VpcPeeringConnectionId: Optional[String]
+    TransitGatewayId: Optional[String]
 
 
 SecurityGroupReferences = List[SecurityGroupReference]
@@ -16688,6 +16698,7 @@ class ModifyTransitGatewayOptions(TypedDict, total=False):
     RemoveTransitGatewayCidrBlocks: Optional[TransitGatewayCidrBlockStringList]
     VpnEcmpSupport: Optional[VpnEcmpSupportValue]
     DnsSupport: Optional[DnsSupportValue]
+    SecurityGroupReferencingSupport: Optional[SecurityGroupReferencingSupportValue]
     AutoAcceptSharedAttachments: Optional[AutoAcceptSharedAttachmentsValue]
     DefaultRouteTableAssociation: Optional[DefaultRouteTableAssociationValue]
     AssociationDefaultRouteTableId: Optional[TransitGatewayRouteTableId]
@@ -16721,6 +16732,7 @@ class ModifyTransitGatewayResult(TypedDict, total=False):
 
 class ModifyTransitGatewayVpcAttachmentRequestOptions(TypedDict, total=False):
     DnsSupport: Optional[DnsSupportValue]
+    SecurityGroupReferencingSupport: Optional[SecurityGroupReferencingSupportValue]
     Ipv6Support: Optional[Ipv6SupportValue]
     ApplianceModeSupport: Optional[ApplianceModeSupportValue]
 
