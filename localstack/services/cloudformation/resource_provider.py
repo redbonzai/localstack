@@ -74,6 +74,7 @@ PROVIDER_DEFAULTS = {
     "AWS::AppSync::GraphQLSchema": "ResourceProvider",
     "AWS::AppSync::Resolver": "ResourceProvider",
     "AWS::ApplicationAutoScaling::ScalingPolicy": "ResourceProvider",
+    "AWS::ApplicationAutoScaling::ScalableTarget": "ResourceProvider",
     "AWS::CertificateManager::Certificate": "ResourceProvider",
     "AWS::CloudFormation::Stack": "ResourceProvider",
     "AWS::CloudWatch::Alarm": "ResourceProvider",
