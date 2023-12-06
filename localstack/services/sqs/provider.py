@@ -30,6 +30,7 @@ from localstack.aws.api.sqs import (
     EmptyBatchRequest,
     GetQueueAttributesResult,
     GetQueueUrlResult,
+    Integer,
     InvalidAttributeName,
     InvalidBatchEntryId,
     InvalidMessageContents,
@@ -41,7 +42,6 @@ from localstack.aws.api.sqs import (
     MessageBodyAttributeMap,
     MessageBodySystemAttributeMap,
     MessageSystemAttributeName,
-    NullableInteger,
     PurgeQueueInProgress,
     QueueAttributeMap,
     QueueAttributeName,
@@ -452,11 +452,11 @@ class SqsDeveloperEndpoints:
 
     def __init__(self, stores=None):
         self.stores = stores or sqs_stores
-        self.service = load_service("sqs-query")
+        self.service = load_service("sqs")
         self.serializer = create_serializer(self.service)
 
     @route("/_aws/sqs/messages")
-    @aws_response_serializer("sqs-query", "ReceiveMessage")
+    @aws_response_serializer("sqs", "ReceiveMessage")
     def list_messages(self, request: Request) -> ReceiveMessageResult:
         """
         This endpoint expects a ``QueueUrl`` request parameter (either as query arg or form parameter), similar to
@@ -483,7 +483,7 @@ class SqsDeveloperEndpoints:
         return self._get_and_serialize_messages(request, region, account_id, queue_name)
 
     @route("/_aws/sqs/messages/<region>/<account_id>/<queue_name>")
-    @aws_response_serializer("sqs-query", "ReceiveMessage")
+    @aws_response_serializer("sqs", "ReceiveMessage")
     def list_messages_for_queue_url(
         self, request: Request, region: str, account_id: str, queue_name: str
     ) -> ReceiveMessageResult:
@@ -778,7 +778,7 @@ class SqsProvider(SqsApi, ServiceLifecycleHook):
         context: RequestContext,
         queue_url: String,
         receipt_handle: String,
-        visibility_timeout: NullableInteger,
+        visibility_timeout: Integer,
     ) -> None:
         queue = self._resolve_queue(context, queue_url=queue_url)
         queue.update_visibility_timeout(receipt_handle, visibility_timeout)
@@ -862,20 +862,23 @@ class SqsProvider(SqsApi, ServiceLifecycleHook):
             except AttributeError:
                 raise InvalidAttributeName(f"Unknown Attribute {attr}.")
 
-            if callable(queue.attributes.get(attr)):
-                func = queue.attributes.get(attr)
-                result[attr] = func()
-            else:
-                result[attr] = queue.attributes.get(attr)
+            value = queue.attributes.get(attr)
+            if callable(value):
+                func = value
+                value = func()
+                if value is not None:
+                    result[attr] = value
+            elif value is not None:
+                result[attr] = value
 
-        return GetQueueAttributesResult(Attributes=result)
+        return GetQueueAttributesResult(Attributes=(result if result else None))
 
     def send_message(
         self,
         context: RequestContext,
         queue_url: String,
         message_body: String,
-        delay_seconds: NullableInteger = None,
+        delay_seconds: Integer = None,
         message_attributes: MessageBodyAttributeMap = None,
         message_system_attributes: MessageBodySystemAttributeMap = None,
         message_deduplication_id: String = None,
@@ -962,8 +965,8 @@ class SqsProvider(SqsApi, ServiceLifecycleHook):
                     )
 
         return SendMessageBatchResult(
-            Successful=successful,
-            Failed=failed,
+            Successful=(successful if successful else None),
+            Failed=(failed if failed else None),
         )
 
     def _put_message(
@@ -971,7 +974,7 @@ class SqsProvider(SqsApi, ServiceLifecycleHook):
         queue: SqsQueue,
         context: RequestContext,
         message_body: String,
-        delay_seconds: NullableInteger = None,
+        delay_seconds: Integer = None,
         message_attributes: MessageBodyAttributeMap = None,
         message_system_attributes: MessageBodySystemAttributeMap = None,
         message_deduplication_id: String = None,
@@ -1009,9 +1012,9 @@ class SqsProvider(SqsApi, ServiceLifecycleHook):
         queue_url: String,
         attribute_names: AttributeNameList = None,
         message_attribute_names: MessageAttributeNameList = None,
-        max_number_of_messages: NullableInteger = None,
-        visibility_timeout: NullableInteger = None,
-        wait_time_seconds: NullableInteger = None,
+        max_number_of_messages: Integer = None,
+        visibility_timeout: Integer = None,
+        wait_time_seconds: Integer = None,
         receive_request_attempt_id: String = None,
     ) -> ReceiveMessageResult:
         queue = self._resolve_queue(context, queue_url=queue_url)
@@ -1064,7 +1067,7 @@ class SqsProvider(SqsApi, ServiceLifecycleHook):
             self._cloudwatch_dispatcher.dispatch_metric_received(queue, received=len(messages))
 
         # TODO: how does receiving behave if the queue was deleted in the meantime?
-        return ReceiveMessageResult(Messages=messages)
+        return ReceiveMessageResult(Messages=(messages if messages else None))
 
     def list_dead_letter_source_queues(
         self,
@@ -1198,7 +1201,7 @@ class SqsProvider(SqsApi, ServiceLifecycleHook):
 
     def list_queue_tags(self, context: RequestContext, queue_url: String) -> ListQueueTagsResult:
         queue = self._resolve_queue(context, queue_url=queue_url)
-        return ListQueueTagsResult(Tags=queue.tags)
+        return ListQueueTagsResult(Tags=(queue.tags if queue.tags else None))
 
     def untag_queue(self, context: RequestContext, queue_url: String, tag_keys: TagKeyList) -> None:
         queue = self._resolve_queue(context, queue_url=queue_url)

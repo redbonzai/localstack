@@ -141,14 +141,12 @@ def test_failing_lambda_retries_after_visibility_timeout(
     first_response = aws_client.sqs.receive_message(
         QueueUrl=destination_url, WaitTimeSeconds=15, MaxNumberOfMessages=1
     )
-    assert "Messages" in first_response
     snapshot.match("first_attempt", first_response)
 
     # and then after a few seconds (at least the visibility timeout), we expect the
     second_response = aws_client.sqs.receive_message(
         QueueUrl=destination_url, WaitTimeSeconds=15, MaxNumberOfMessages=1
     )
-    assert "Messages" in second_response
     snapshot.match("second_attempt", second_response)
 
     # check that it took at least the retry timeout between the first and second attempt
@@ -158,8 +156,7 @@ def test_failing_lambda_retries_after_visibility_timeout(
     third_response = aws_client.sqs.receive_message(
         QueueUrl=destination_url, WaitTimeSeconds=retry_timeout + 1, MaxNumberOfMessages=1
     )
-    assert "Messages" in third_response
-    assert third_response["Messages"] == []
+    assert "Messages" not in third_response or third_response["Messages"] == []
 
 
 @markers.snapshot.skip_snapshot_verify(
@@ -336,24 +333,20 @@ def test_redrive_policy_with_failing_lambda(
     first_response = aws_client.sqs.receive_message(
         QueueUrl=destination_url, WaitTimeSeconds=15, MaxNumberOfMessages=1
     )
-    assert "Messages" in first_response
     snapshot.match("first_attempt", first_response)
 
     # check that the DLQ is empty
     second_response = aws_client.sqs.receive_message(QueueUrl=event_dlq_url, WaitTimeSeconds=1)
-    assert "Messages" in second_response
-    assert second_response["Messages"] == []
+    assert "Messages" not in second_response or second_response["Messages"] == []
 
     # the second is also expected to fail, and then the message moves into the DLQ
     third_response = aws_client.sqs.receive_message(
         QueueUrl=destination_url, WaitTimeSeconds=15, MaxNumberOfMessages=1
     )
-    assert "Messages" in third_response
     snapshot.match("second_attempt", third_response)
 
     # now check that the event messages was placed in the DLQ
     dlq_response = aws_client.sqs.receive_message(QueueUrl=event_dlq_url, WaitTimeSeconds=15)
-    assert "Messages" in dlq_response
     snapshot.match("dlq_response", dlq_response)
 
 
@@ -565,7 +558,6 @@ def test_report_batch_item_failures(
     first_invocation = aws_client.sqs.receive_message(
         QueueUrl=destination_url, WaitTimeSeconds=int(retry_timeout / 2), MaxNumberOfMessages=1
     )
-    assert "Messages" in first_invocation
     # hack to make snapshot work
     first_invocation["Messages"][0]["Body"] = json.loads(first_invocation["Messages"][0]["Body"])
     first_invocation["Messages"][0]["Body"]["event"]["Records"].sort(
@@ -574,9 +566,8 @@ def test_report_batch_item_failures(
     snapshot.match("first_invocation", first_invocation)
 
     # check that the DQL is empty
-    dlq_messages = aws_client.sqs.receive_message(QueueUrl=event_dlq_url)["Messages"]
-    assert dlq_messages == []
-    assert not dlq_messages
+    dlq_messages = aws_client.sqs.receive_message(QueueUrl=event_dlq_url)
+    assert "Messages" not in dlq_messages or dlq_messages["Messages"] == []
 
     # now wait for the second invocation result which is expected to have processed message 2 and 3
     second_invocation = aws_client.sqs.receive_message(
@@ -594,11 +585,10 @@ def test_report_batch_item_failures(
     third_attempt = aws_client.sqs.receive_message(
         QueueUrl=destination_url, WaitTimeSeconds=1, MaxNumberOfMessages=1
     )
-    assert third_attempt["Messages"] == []
+    assert "Messages" not in third_attempt or third_attempt["Messages"] == []
 
     # now check that message 4 was placed in the DLQ
     dlq_response = aws_client.sqs.receive_message(QueueUrl=event_dlq_url, WaitTimeSeconds=15)
-    assert "Messages" in dlq_response
     snapshot.match("dlq_response", dlq_response)
 
 
@@ -857,15 +847,13 @@ def test_report_batch_item_failures_empty_json_batch_succeeds(
     first_invocation = aws_client.sqs.receive_message(
         QueueUrl=destination_url, WaitTimeSeconds=15, MaxNumberOfMessages=1
     )
-    assert "Messages" in first_invocation
     snapshot.match("first_invocation", first_invocation)
 
     # now check that the messages was placed in the DLQ
     dlq_response = aws_client.sqs.receive_message(
         QueueUrl=event_dlq_url, WaitTimeSeconds=retry_timeout + 1
     )
-    assert "Messages" in dlq_response
-    assert dlq_response["Messages"] == []
+    assert "Messages" not in dlq_response or dlq_response["Messages"] == []
 
 
 @markers.snapshot.skip_snapshot_verify(
@@ -992,7 +980,7 @@ class TestSQSEventSourceMapping:
         snapshot.match("events", events)
 
         rs = aws_client.sqs.receive_message(QueueUrl=queue_url_1)
-        assert rs.get("Messages") == []
+        assert rs.get("Messages", []) == []
 
     @markers.aws.validated
     @pytest.mark.parametrize(
@@ -1122,7 +1110,7 @@ class TestSQSEventSourceMapping:
         snapshot.match("invocation_events", invocation_events)
 
         rs = aws_client.sqs.receive_message(QueueUrl=queue_url_1)
-        assert rs.get("Messages") == []
+        assert rs.get("Messages", []) == []
 
     @markers.aws.validated
     @pytest.mark.parametrize(
@@ -1241,7 +1229,7 @@ class TestSQSEventSourceMapping:
         snapshot.match("events", events)
 
         rs = aws_client.sqs.receive_message(QueueUrl=queue_url_1)
-        assert rs.get("Messages") == []
+        assert rs.get("Messages", []) == []
 
         # # create new function version
         aws_client.lambda_.update_function_configuration(
@@ -1282,4 +1270,4 @@ class TestSQSEventSourceMapping:
         snapshot.match("events_postupdate", events_postupdate)
 
         rs = aws_client.sqs.receive_message(QueueUrl=queue_url_1)
-        assert rs.get("Messages") == []
+        assert rs.get("Messages", []) == []
