@@ -35,6 +35,7 @@ class PayloadBindingPath(PayloadBinding):
             value = JSONPathUtils.extract_json(self.path, env.inp)
         except RuntimeError:
             failure_event = FailureEvent(
+                env=env,
                 error_name=StatesErrorName(typ=StatesErrorNameType.StatesRuntime),
                 event_type=HistoryEventType.TaskFailed,
                 event_details=EventDetails(

@@ -39,6 +39,7 @@ class StateFail(CommonStateField):
 
         error_name = CustomErrorName(self.error.error) if self.error else None
         failure_event = FailureEvent(
+            env=env,
             error_name=error_name,
             event_type=HistoryEventType.TaskFailed,
             event_details=EventDetails(taskFailedEventDetails=task_failed_event_details),

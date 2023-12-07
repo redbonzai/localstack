@@ -59,6 +59,7 @@ class StateTaskServiceSns(StateTaskServiceCallback):
             )
 
             return FailureEvent(
+                env=env,
                 error_name=CustomErrorName(error_name=error_name),
                 event_type=HistoryEventType.TaskFailed,
                 event_details=EventDetails(

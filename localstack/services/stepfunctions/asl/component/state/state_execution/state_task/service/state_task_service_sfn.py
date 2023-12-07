@@ -121,6 +121,7 @@ class StateTaskServiceSfn(StateTaskServiceCallback):
                 f"{ex.response['Error']['Message']} ({'; '.join(error_cause_details)})"
             )
             return FailureEvent(
+                env=env,
                 error_name=CustomErrorName(error_name),
                 event_type=HistoryEventType.TaskFailed,
                 event_details=EventDetails(
@@ -212,6 +213,7 @@ class StateTaskServiceSfn(StateTaskServiceCallback):
                 else:
                     raise FailureEventException(
                         FailureEvent(
+                            env=env,
                             error_name=StatesErrorName(typ=StatesErrorNameType.StatesTaskFailed),
                             event_type=HistoryEventType.TaskFailed,
                             event_details=EventDetails(

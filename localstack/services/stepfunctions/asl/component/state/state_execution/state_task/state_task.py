@@ -63,8 +63,9 @@ class StateTask(ExecutionState, abc.ABC):
                 normalised_parameters[norm_parameter_key] = tmp
         return normalised_parameters
 
-    def _get_timed_out_failure_event(self) -> FailureEvent:
+    def _get_timed_out_failure_event(self, env: Environment) -> FailureEvent:
         return FailureEvent(
+            env=env,
             error_name=StatesErrorName(typ=StatesErrorNameType.StatesTimeout),
             event_type=HistoryEventType.TaskTimedOut,
             event_details=EventDetails(
@@ -76,7 +77,7 @@ class StateTask(ExecutionState, abc.ABC):
 
     def _from_error(self, env: Environment, ex: Exception) -> FailureEvent:
         if isinstance(ex, TimeoutError):
-            return self._get_timed_out_failure_event()
+            return self._get_timed_out_failure_event(env=env)
         return super()._from_error(env=env, ex=ex)
 
     def _eval_parameters(self, env: Environment) -> dict:
