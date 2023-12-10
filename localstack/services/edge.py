@@ -31,7 +31,8 @@ the actual AWS service call is made."""
 def do_start_edge(
     listen: HostAndPort | List[HostAndPort], use_ssl: bool, asynchronous: bool = False
 ):
-    from localstack.aws.serving.edge import serve_gateway
+    # from localstack.aws.serving.edge import serve_gateway
+    from localstack.aws.serving.twisted import serve_gateway
 
     return serve_gateway(listen, use_ssl, asynchronous)
 
