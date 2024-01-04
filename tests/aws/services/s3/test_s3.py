@@ -517,7 +517,19 @@ class TestS3:
         condition=is_v2_provider,
         paths=["$..ServerSideEncryption"],
     )
-    @pytest.mark.parametrize("key", ["file%2Fname", "test@key/", "test%123", "test%percent"])
+    @pytest.mark.parametrize(
+        "key",
+        [
+            "file%2Fname",
+            "test@key/",
+            "test%123",
+            "test%percent",
+            "test key/",
+            "test key//",
+            "test%123/",
+            "a/%F0%9F%98%80/",
+        ],
+    )
     def test_put_get_object_special_character(self, s3_bucket, aws_client, snapshot, key):
         snapshot.add_transformer(snapshot.transform.s3_api())
         resp = aws_client.s3.put_object(Bucket=s3_bucket, Key=key, Body=b"test")
@@ -2758,6 +2770,77 @@ class TestS3:
         assert completed_object["Body"].read() == to_bytes(body)
 
     @markers.aws.only_localstack
+    def test_upload_part_chunked_cancelled_valid_etag(self, s3_bucket, aws_client):
+        """
+        When using async-type requests, it's possible to cancel them inflight. This will make the request body
+        incomplete, and will fail during the stream decoding. We can simulate this with body by passing an incomplete
+        body, which triggers the same kind of exception.
+        This test is to avoid regression for https://github.com/localstack/localstack/issues/9851
+        """
+        body = "Hello Blob"
+        precalculated_etag = hashlib.md5(body.encode()).hexdigest()
+        headers = {
+            "Authorization": mock_aws_request_headers(
+                "s3", aws_access_key_id=TEST_AWS_ACCESS_KEY_ID, region_name=TEST_AWS_REGION_NAME
+            )["Authorization"],
+            "Content-Type": "audio/mpeg",
+            "X-Amz-Content-Sha256": "STREAMING-AWS4-HMAC-SHA256-PAYLOAD-TRAILER",
+            "X-Amz-Date": "20190918T051509Z",
+            "X-Amz-Decoded-Content-Length": str(len(body)),
+            "Content-Encoding": "aws-chunked",
+        }
+
+        key_name = "test-multipart-chunked"
+        response = aws_client.s3.create_multipart_upload(
+            Bucket=s3_bucket,
+            Key=key_name,
+        )
+        upload_id = response["UploadId"]
+
+        # # upload the invalid part 1
+        invalid_data = (
+            "\r\n"
+            f"{body}\r\n"
+            "0;chunk-signature=78fae1c533e34dbaf2b83ad64ff02e4b64b7bc681ea76b6acf84acf1c48a83cb\r\n"
+        )
+        url = f"{config.internal_service_url()}/{s3_bucket}/{key_name}?partNumber={1}&uploadId={upload_id}"
+
+        response = requests.put(url, invalid_data, headers=headers, verify=False)
+        assert response.status_code == 500
+
+        # now re-upload the valid part and assert that the part was correctly uploaded
+        data = (
+            "a;chunk-signature=b5311ac60a88890e740a41e74f3d3b03179fd058b1e24bb3ab224042377c4ec9\r\n"
+            f"{body}\r\n"
+            "0;chunk-signature=78fae1c533e34dbaf2b83ad64ff02e4b64b7bc681ea76b6acf84acf1c48a83cb\r\n"
+        )
+        response = requests.put(url, data, headers=headers, verify=False)
+        assert response.ok
+
+        part_etag = response.headers.get("ETag")
+        assert not response.content
+
+        # validate that the object etag is the same as the pre-calculated one
+        assert part_etag.strip('"') == precalculated_etag
+
+        multipart_upload_parts = [
+            {
+                "ETag": part_etag,
+                "PartNumber": 1,
+            }
+        ]
+
+        aws_client.s3.complete_multipart_upload(
+            Bucket=s3_bucket,
+            Key=key_name,
+            MultipartUpload={"Parts": multipart_upload_parts},
+            UploadId=upload_id,
+        )
+
+        completed_object = aws_client.s3.get_object(Bucket=s3_bucket, Key=key_name)
+        assert completed_object["Body"].read() == to_bytes(body)
+
+    @markers.aws.only_localstack
     def test_virtual_host_proxy_does_not_decode_gzip(self, aws_client, s3_bucket):
         # Write contents to memory rather than a file.
         data = "123gzipfile"
@@ -4469,7 +4552,10 @@ class TestS3:
         assert "ListAllMyBucketsResult" in resp_dict
         # validate that the Owner tag is first, before Buckets. This is because the Java SDK is counting on the order
         # to properly set the Owner value to the buckets.
-        resp_dict["ListAllMyBucketsResult"].pop("@xmlns", None)
+        assert (
+            resp_dict["ListAllMyBucketsResult"].pop("@xmlns")
+            == "http://s3.amazonaws.com/doc/2006-03-01/"
+        )
         list_buckets_tags = list(resp_dict["ListAllMyBucketsResult"].keys())
         assert list_buckets_tags[0] == "Owner"
         assert list_buckets_tags[1] == "Buckets"
@@ -4480,6 +4566,7 @@ class TestS3:
         assert b'<?xml version="1.0" encoding="UTF-8"?>\n' in get_xml_content(resp.content)
         resp_dict = xmltodict.parse(resp.content)
         assert "ListBucketResult" in resp_dict
+        assert resp_dict["ListBucketResult"]["@xmlns"] == "http://s3.amazonaws.com/doc/2006-03-01/"
         # validate that the Contents tag is last, after BucketName. Again for the Java SDK to properly set the
         # BucketName value to the objects.
         list_objects_tags = list(resp_dict["ListBucketResult"].keys())
@@ -4492,6 +4579,7 @@ class TestS3:
         assert b'<?xml version="1.0" encoding="UTF-8"?>\n' in get_xml_content(resp.content)
         resp_dict = xmltodict.parse(resp.content)
         assert "ListBucketResult" in resp_dict
+        assert resp_dict["ListBucketResult"]["@xmlns"] == "http://s3.amazonaws.com/doc/2006-03-01/"
         # same as ListObjects
         list_objects_v2_tags = list(resp_dict["ListBucketResult"].keys())
         assert list_objects_v2_tags.index("Name") < list_objects_v2_tags.index("Contents")
@@ -4503,11 +4591,17 @@ class TestS3:
         assert b'<?xml version="1.0" encoding="UTF-8"?>\n' in get_xml_content(resp.content)
         resp_dict = xmltodict.parse(resp.content)
         assert "ListMultipartUploadsResult" in resp_dict
+        assert (
+            resp_dict["ListMultipartUploadsResult"]["@xmlns"]
+            == "http://s3.amazonaws.com/doc/2006-03-01/"
+        )
 
         # GetBucketLocation
         location_constraint_url = f"{bucket_url}?location"
         resp = s3_http_client.get(location_constraint_url, headers=headers)
-        assert b'<?xml version="1.0" encoding="UTF-8"?>\n' in get_xml_content(resp.content)
+        xml_content = get_xml_content(resp.content)
+        assert b'<?xml version="1.0" encoding="UTF-8"?>\n' in xml_content
+        assert b'<LocationConstraint xmlns="http://s3.amazonaws.com/doc/2006-03-01/"' in xml_content
 
         tagging = {"TagSet": [{"Key": "tag1", "Value": "tag1"}]}
         # put some tags on the bucket
@@ -4518,6 +4612,7 @@ class TestS3:
         resp = s3_http_client.get(get_bucket_tagging_url, headers=headers)
         resp_dict = xmltodict.parse(resp.content)
         assert resp_dict["Tagging"]["TagSet"] == {"Tag": {"Key": "tag1", "Value": "tag1"}}
+        assert resp_dict["Tagging"]["@xmlns"] == "http://s3.amazonaws.com/doc/2006-03-01/"
 
         # put an object to tests the next requests
         key_name = "test-key"
@@ -4528,18 +4623,21 @@ class TestS3:
         resp = s3_http_client.get(get_object_tagging_url, headers=headers)
         resp_dict = xmltodict.parse(resp.content)
         assert resp_dict["Tagging"]["TagSet"] == {"Tag": {"Key": "tag1", "Value": "tag1"}}
+        assert resp_dict["Tagging"]["@xmlns"] == "http://s3.amazonaws.com/doc/2006-03-01/"
 
         # CopyObject
         get_object_tagging_url = f"{bucket_url}/{key_name}?tagging"
         resp = s3_http_client.get(get_object_tagging_url, headers=headers)
         resp_dict = xmltodict.parse(resp.content)
         assert resp_dict["Tagging"]["TagSet"] == {"Tag": {"Key": "tag1", "Value": "tag1"}}
+        assert resp_dict["Tagging"]["@xmlns"] == "http://s3.amazonaws.com/doc/2006-03-01/"
 
         copy_object_url = f"{bucket_url}/copied-key"
         copy_object_headers = {**headers, "x-amz-copy-source": f"{bucket_url}/{key_name}"}
         resp = s3_http_client.put(copy_object_url, headers=copy_object_headers)
         resp_dict = xmltodict.parse(resp.content)
         assert "CopyObjectResult" in resp_dict
+        assert resp_dict["CopyObjectResult"]["@xmlns"] == "http://s3.amazonaws.com/doc/2006-03-01/"
 
         multipart_key = "multipart-key"
         create_multipart = aws_client.s3.create_multipart_upload(
@@ -5459,6 +5557,38 @@ class TestS3:
         response = aws_client.s3.list_objects_v2(Bucket=s3_bucket)
         snapshot.match("list-obj-after-empty", response)
 
+    @markers.aws.only_localstack
+    @pytest.mark.xfail(
+        condition=LEGACY_V2_S3_PROVIDER,
+        reason="Moto parsing fails on the form",
+    )
+    def test_s3_raw_request_routing(self, s3_bucket, aws_client):
+        """
+        When sending a PutObject request to S3 with a very raw request not having any indication that the request is
+        directed to S3 (no signing, no specific S3 endpoint) and encoded as a form, the request will go through the
+        ServiceNameParser handler.
+        This parser will try to parse the form data (which in our case is binary data), and will fail with a decoding
+        error. It also consumes the stream, and leaves S3 with no data to save.
+        This test verifies that this scenario works by skipping the service name thanks to the early S3 CORS handler.
+        """
+        default_endpoint = f"http://{get_localstack_host().host_and_port()}"
+        object_key = "test-routing-key"
+        key_url = f"{default_endpoint}/{s3_bucket}/{object_key}"
+        data = os.urandom(445529)
+        resp = requests.put(
+            key_url, data=data, headers={"Content-Type": "application/x-www-form-urlencoded"}
+        )
+        assert resp.ok
+
+        get_object = aws_client.s3.get_object(Bucket=s3_bucket, Key=object_key)
+        assert get_object["Body"].read() == data
+
+        fake_key_url = f"{default_endpoint}/fake-bucket-{short_uid()}/{object_key}"
+        resp = requests.put(
+            fake_key_url, data=data, headers={"Content-Type": "application/x-www-form-urlencoded"}
+        )
+        assert b"NoSuchBucket" in resp.content
+
 
 class TestS3MultiAccounts:
     @pytest.fixture
@@ -6366,9 +6496,14 @@ class TestS3PresignedUrl:
         )
         snapshot.match("copy-obj", response)
 
+        presigned_client = _s3_client_custom_config(
+            Config(signature_version="s3v4", s3={"payload_signing_enabled": True}),
+            endpoint_url=_endpoint_url(),
+        )
+
         # Create copy object to try to match s3a setting Content-MD5
         dest_key2 = "dest"
-        url = aws_client.s3.generate_presigned_url(
+        url = presigned_client.generate_presigned_url(
             "copy_object",
             Params={
                 "Bucket": s3_bucket,
@@ -6377,7 +6512,9 @@ class TestS3PresignedUrl:
             },
         )
 
-        request_response = requests.put(url, verify=False)
+        request_response = requests.put(
+            url, headers={"x-amz-copy-source": f"{s3_bucket}/{src_key}"}, verify=False
+        )
         assert request_response.status_code == 200
 
     @markers.aws.only_localstack
@@ -6673,6 +6810,10 @@ class TestS3PresignedUrl:
             runtime=Runtime.nodejs14_x,
             handler="lambda_s3_integration_presign.handler",
             role=lambda_su_role,
+            envvars={
+                "ACCESS_KEY": TEST_AWS_ACCESS_KEY_ID,
+                "SECRET_KEY": TEST_AWS_SECRET_ACCESS_KEY,
+            },
         )
         s3_create_bucket(Bucket=function_name)
 
@@ -6740,6 +6881,10 @@ class TestS3PresignedUrl:
             runtime=Runtime.nodejs14_x,
             handler="lambda_s3_integration_sdk_v2.handler",
             role=lambda_su_role,
+            envvars={
+                "ACCESS_KEY": TEST_AWS_ACCESS_KEY_ID,
+                "SECRET_KEY": TEST_AWS_SECRET_ACCESS_KEY,
+            },
         )
         s3_create_bucket(Bucket=function_name)
 
@@ -8466,6 +8611,9 @@ class TestS3BucketLifecycle:
         )
         snapshot.match("put-object-match-both-rules", put_object)
 
+        get_object = aws_client.s3.get_object(Bucket=s3_bucket, Key=key_match_1)
+        snapshot.match("get-object-match-both-rules", get_object)
+
         _, parsed_exp_rule = parse_expiration_header(put_object["Expiration"])
         assert parsed_exp_rule == rule_id_1
 
@@ -8475,6 +8623,9 @@ class TestS3BucketLifecycle:
             Body=b"test", Bucket=s3_bucket, Key=key_match_2, Tagging=tag_set_match_one
         )
         snapshot.match("put-object-match-rule-1", put_object_2)
+
+        get_object_2 = aws_client.s3.get_object(Bucket=s3_bucket, Key=key_match_2)
+        snapshot.match("get-object-match-rule-1", get_object_2)
 
         _, parsed_exp_rule = parse_expiration_header(put_object_2["Expiration"])
         assert parsed_exp_rule == rule_id_1
@@ -8486,6 +8637,17 @@ class TestS3BucketLifecycle:
         )
         snapshot.match("put-object-no-match", put_object_3)
         assert "Expiration" not in put_object_3
+
+        get_object_3 = aws_client.s3.get_object(Bucket=s3_bucket, Key=key_no_match)
+        snapshot.match("get-object-no-match", get_object_3)
+
+        key_no_tags = "no-tags"
+        put_object_4 = aws_client.s3.put_object(Body=b"test", Bucket=s3_bucket, Key=key_no_tags)
+        snapshot.match("put-object-no-tags", put_object_4)
+        assert "Expiration" not in put_object_4
+
+        get_object_4 = aws_client.s3.get_object(Bucket=s3_bucket, Key=key_no_tags)
+        snapshot.match("get-object-no-tags", get_object_4)
 
     @markers.aws.validated
     @markers.snapshot.skip_snapshot_verify(

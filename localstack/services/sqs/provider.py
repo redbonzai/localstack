@@ -6,6 +6,7 @@ import re
 import threading
 import time
 from concurrent.futures.thread import ThreadPoolExecutor
+from itertools import islice
 from typing import Dict, List, Optional, Tuple
 
 from moto.sqs.models import BINARY_TYPE_FIELD_INDEX, STRING_TYPE_FIELD_INDEX
@@ -85,7 +86,11 @@ from localstack.services.sqs.utils import (
 from localstack.utils.aws.arns import parse_arn
 from localstack.utils.aws.request_context import extract_region_from_headers
 from localstack.utils.bootstrap import is_api_enabled
-from localstack.utils.cloudwatch.cloudwatch_util import publish_sqs_metric
+from localstack.utils.cloudwatch.cloudwatch_util import (
+    SqsMetricBatchData,
+    publish_sqs_metric,
+    publish_sqs_metric_batch,
+)
 from localstack.utils.run import FuncThread
 from localstack.utils.scheduler import Scheduler
 from localstack.utils.strings import md5
@@ -274,36 +279,48 @@ class CloudwatchPublishWorker:
         self.thread: Optional[FuncThread] = None
 
     def publish_approximate_cloudwatch_metrics(self):
-        for account_id, region, store in sqs_stores.iter_stores():
-            for queue in store.queues.values():
-                self.publish_approximate_metrics_for_queue_to_cloudwatch(queue)
-
-    def publish_approximate_metrics_for_queue_to_cloudwatch(self, queue):
         """Publishes the metrics for ApproximateNumberOfMessagesVisible, ApproximateNumberOfMessagesNotVisible
         and ApproximateNumberOfMessagesDelayed to CloudWatch"""
         # TODO ApproximateAgeOfOldestMessage is missing
         #  https://docs.aws.amazon.com/AWSSimpleQueueService/latest/SQSDeveloperGuide/sqs-available-cloudwatch-metrics.html
-        publish_sqs_metric(
-            account_id=queue.account_id,
-            region=queue.region,
-            queue_name=queue.name,
-            metric="ApproximateNumberOfMessagesVisible",
-            value=queue.approx_number_of_messages,
-        )
-        publish_sqs_metric(
-            account_id=queue.account_id,
-            region=queue.region,
-            queue_name=queue.name,
-            metric="ApproximateNumberOfMessagesNotVisible",
-            value=queue.approx_number_of_messages_not_visible,
-        )
-        publish_sqs_metric(
-            account_id=queue.account_id,
-            region=queue.region,
-            queue_name=queue.name,
-            metric="ApproximateNumberOfMessagesDelayed",
-            value=queue.approx_number_of_messages_delayed,
-        )
+
+        for account_id, region, store in sqs_stores.iter_stores():
+            start = 0
+            # we can include up to 1000 metric queries for one put-metric-data call
+            #  and we currently include 3 metrics per queue
+            batch_size = 300
+
+            while start < len(store.queues):
+                batch_data = []
+                # Process the current batch
+                for queue in islice(store.queues.values(), start, start + batch_size):
+                    batch_data.append(
+                        SqsMetricBatchData(
+                            QueueName=queue.name,
+                            MetricName="ApproximateNumberOfMessagesVisible",
+                            Value=queue.approx_number_of_messages,
+                        )
+                    )
+                    batch_data.append(
+                        SqsMetricBatchData(
+                            QueueName=queue.name,
+                            MetricName="ApproximateNumberOfMessagesNotVisible",
+                            Value=queue.approx_number_of_messages_not_visible,
+                        )
+                    )
+                    batch_data.append(
+                        SqsMetricBatchData(
+                            QueueName=queue.name,
+                            MetricName="ApproximateNumberOfMessagesDelayed",
+                            Value=queue.approx_number_of_messages_delayed,
+                        )
+                    )
+
+                publish_sqs_metric_batch(
+                    account_id=account_id, region=region, sqs_metric_batch_data=batch_data
+                )
+                # Update for the next batch
+                start += batch_size
 
     def start(self):
         if self.thread:
@@ -355,6 +372,12 @@ class QueueUpdateWorker:
                     queue.enqueue_delayed_messages()
                 except Exception:
                     LOG.exception("error enqueueing delayed messages")
+
+                if config.SQS_ENABLE_MESSAGE_RETENTION_PERIOD:
+                    try:
+                        queue.remove_expired_messages()
+                    except Exception:
+                        LOG.exception("error removing expired messages")
 
     def start(self):
         with self.mutex:
@@ -429,12 +452,12 @@ def check_attributes(message_attributes: MessageBodyAttributeMap):
                 raise InvalidParameterValueException(e.args[0])
 
 
-def check_fifo_id(fifo_id):
+def check_fifo_id(fifo_id, parameter):
     if not fifo_id:
         return
-    if len(fifo_id) >= 128:
+    if len(fifo_id) > 128:
         raise InvalidParameterValueException(
-            "Message deduplication ID and group ID must be shorter than 128 bytes"
+            f"Value {fifo_id} for parameter {parameter} is invalid. Reason: {parameter} can only include alphanumeric and punctuation characters. 1 to 128 in length."
         )
     if not re.match(sqs_constants.FIFO_MSG_REGEX, fifo_id):
         raise InvalidParameterValueException(
@@ -771,6 +794,9 @@ class SqsProvider(SqsApi, ServiceLifecycleHook):
             #  NextToken response element directly outside of the AWS CLI.
             urls = urls[:max_results]
 
+        if len(urls) == 0:
+            return ListQueuesResult()
+
         return ListQueuesResult(QueueUrls=urls)
 
     def change_message_visibility(
@@ -883,10 +909,6 @@ class SqsProvider(SqsApi, ServiceLifecycleHook):
     ) -> SendMessageResult:
         queue = self._resolve_queue(context, queue_url=queue_url)
 
-        # Have to check the message size here, rather than in _put_message
-        # to avoid multiple calls for batch messages.
-        check_message_size(message_body, message_attributes, queue.maximum_message_size)
-
         queue_item = self._put_message(
             queue,
             context,
@@ -951,6 +973,15 @@ class SqsProvider(SqsApi, ServiceLifecycleHook):
                             SequenceNumber=queue_item.sequence_number,
                         )
                     )
+                except ServiceException as e:
+                    failed.append(
+                        BatchResultErrorEntry(
+                            Id=entry["Id"],
+                            SenderFault=e.sender_fault,
+                            Code=e.code,
+                            Message=e.message,
+                        )
+                    )
                 except Exception as e:
                     failed.append(
                         BatchResultErrorEntry(
@@ -977,11 +1008,12 @@ class SqsProvider(SqsApi, ServiceLifecycleHook):
         message_deduplication_id: String = None,
         message_group_id: String = None,
     ) -> SqsMessage:
+        check_message_size(message_body, message_attributes, queue.maximum_message_size)
         check_message_content(message_body)
         check_attributes(message_attributes)
         check_attributes(message_system_attributes)
-        check_fifo_id(message_deduplication_id)
-        check_fifo_id(message_group_id)
+        check_fifo_id(message_deduplication_id, "MessageDeduplicationId")
+        check_fifo_id(message_group_id, "MessageGroupId")
 
         message = Message(
             MessageId=generate_message_id(),

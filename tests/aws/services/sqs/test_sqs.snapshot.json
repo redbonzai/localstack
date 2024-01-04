@@ -850,7 +850,7 @@
     "recorded-content": {}
   },
   "tests/aws/services/sqs/test_sqs.py::TestSqsProvider::test_list_queues": {
-    "recorded-date": "14-11-2023, 11:57:28",
+    "recorded-date": "08-12-2023, 17:13:26",
     "recorded-content": {}
   },
   "tests/aws/services/sqs/test_sqs.py::TestSqsProvider::test_fifo_set_content_based_deduplication_strategy": {
@@ -1340,6 +1340,66 @@
     "recorded-date": "14-11-2023, 17:51:55",
     "recorded-content": {
       "visibility_timeout_expired": {
+        "ResponseMetadata": {
+          "HTTPHeaders": {},
+          "HTTPStatusCode": 200
+        }
+      }
+    }
+  },
+  "tests/aws/services/sqs/test_sqs.py::TestSqsProvider::test_message_deduplication_id_too_long": {
+    "recorded-date": "27-12-2023, 17:52:08",
+    "recorded-content": {
+      "error-response": {
+        "Error": {
+          "Code": "InvalidParameterValue",
+          "Message": "Value aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa for parameter MessageDeduplicationId is invalid. Reason: MessageDeduplicationId can only include alphanumeric and punctuation characters. 1 to 128 in length.",
+          "QueryErrorCode": "InvalidParameterValueException",
+          "Type": "Sender"
+        },
+        "ResponseMetadata": {
+          "HTTPHeaders": {},
+          "HTTPStatusCode": 400
+        }
+      }
+    }
+  },
+  "tests/aws/services/sqs/test_sqs.py::TestSqsProvider::test_message_group_id_too_long": {
+    "recorded-date": "27-12-2023, 17:49:16",
+    "recorded-content": {
+      "error-response": {
+        "Error": {
+          "Code": "InvalidParameterValue",
+          "Message": "Value aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa for parameter MessageGroupId is invalid. Reason: MessageGroupId can only include alphanumeric and punctuation characters. 1 to 128 in length.",
+          "QueryErrorCode": "InvalidParameterValueException",
+          "Type": "Sender"
+        },
+        "ResponseMetadata": {
+          "HTTPHeaders": {},
+          "HTTPStatusCode": 400
+        }
+      }
+    }
+  },
+  "tests/aws/services/sqs/test_sqs.py::TestSqsProvider::test_send_batch_message_size": {
+    "recorded-date": "03-01-2024, 01:58:35",
+    "recorded-content": {
+      "send-message-batch-result": {
+        "Failed": [
+          {
+            "Code": "InvalidParameterValue",
+            "Id": "<uuid:1>",
+            "Message": "One or more parameters cannot be validated. Reason: Message must be shorter than 1024 bytes.",
+            "SenderFault": true
+          }
+        ],
+        "Successful": [
+          {
+            "Id": "<uuid:2>",
+            "MD5OfMessageBody": "c9a34cfc85d982698c6ac89f76071abd",
+            "MessageId": "<uuid:3>"
+          }
+        ],
         "ResponseMetadata": {
           "HTTPHeaders": {},
           "HTTPStatusCode": 200

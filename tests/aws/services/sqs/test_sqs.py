@@ -1,7 +1,9 @@
 import json
 import os
 import re
+import threading
 import time
+from queue import Empty, Queue
 from threading import Timer
 from typing import Dict
 
@@ -24,6 +26,7 @@ from localstack.services.sqs.constants import DEFAULT_MAXIMUM_MESSAGE_SIZE
 from localstack.services.sqs.models import sqs_stores
 from localstack.services.sqs.provider import MAX_NUMBER_OF_MESSAGES
 from localstack.services.sqs.utils import parse_queue_url
+from localstack.testing.aws.util import is_aws_cloud
 from localstack.testing.pytest import markers
 from localstack.testing.snapshots.transformer import GenericTransformer
 from localstack.utils.aws import arns
@@ -129,6 +132,10 @@ class TestSqsProvider:
         assert "QueueUrls" in result
         for url in queue_urls:
             assert url in result["QueueUrls"]
+
+        # list queues with empty result
+        result = aws_client.sqs.list_queues(QueueNamePrefix="nonexisting-queue-")
+        assert "QueueUrls" not in result
 
     @markers.aws.validated
     def test_create_queue_and_get_attributes(self, sqs_queue, aws_client):
@@ -617,6 +624,52 @@ class TestSqsProvider:
         assert message_sent_hash == message_received_hash
 
     @markers.aws.validated
+    def test_message_deduplication_id_too_long(self, sqs_create_queue, aws_client, snapshot):
+        # see issue https://github.com/localstack/localstack/issues/6612
+        queue_name = f"queue-{short_uid()}.fifo"
+        attributes = {"FifoQueue": "true"}
+        queue_url = sqs_create_queue(QueueName=queue_name, Attributes=attributes)
+
+        aws_client.sqs.send_message(
+            QueueUrl=queue_url,
+            MessageBody="Hello World!",
+            MessageGroupId="test",
+            MessageDeduplicationId="a" * 128,
+        )
+
+        with pytest.raises(ClientError) as e:
+            aws_client.sqs.send_message(
+                QueueUrl=queue_url,
+                MessageBody="Hello World!",
+                MessageGroupId="test",
+                MessageDeduplicationId="a" * 129,
+            )
+        snapshot.match("error-response", e.value.response)
+
+    @markers.aws.validated
+    def test_message_group_id_too_long(self, sqs_create_queue, aws_client, snapshot):
+        # see issue https://github.com/localstack/localstack/issues/6612
+        queue_name = f"queue-{short_uid()}.fifo"
+        attributes = {"FifoQueue": "true"}
+        queue_url = sqs_create_queue(QueueName=queue_name, Attributes=attributes)
+
+        aws_client.sqs.send_message(
+            QueueUrl=queue_url,
+            MessageBody="Hello World!",
+            MessageGroupId="a" * 128,
+            MessageDeduplicationId="1",
+        )
+
+        with pytest.raises(ClientError) as e:
+            aws_client.sqs.send_message(
+                QueueUrl=queue_url,
+                MessageBody="Hello World!",
+                MessageGroupId="a" * 129,
+                MessageDeduplicationId="2",
+            )
+        snapshot.match("error-response", e.value.response)
+
+    @markers.aws.validated
     def test_create_queue_with_different_attributes_raises_exception(
         self, sqs_create_queue, snapshot, aws_client
     ):
@@ -987,6 +1040,102 @@ class TestSqsProvider:
         response = aws_client.sqs.receive_message(QueueUrl=queue_url, WaitTimeSeconds=1)
         assert len(response["Messages"]) == 1
 
+    @markers.aws.validated
+    def test_message_retention(self, sqs_create_queue, aws_client, monkeypatch):
+        monkeypatch.setattr(config, "SQS_ENABLE_MESSAGE_RETENTION_PERIOD", True)
+        # in AWS, message retention is at least 60 seconds
+        if is_aws_cloud():
+            retention = 60
+            wait_time = 5
+        else:
+            retention = 2
+            wait_time = 1
+
+        queue_url = sqs_create_queue(Attributes={"MessageRetentionPeriod": str(retention)})
+
+        aws_client.sqs.send_message(QueueUrl=queue_url, MessageBody="foobar1")
+        aws_client.sqs.send_message(QueueUrl=queue_url, MessageBody="foobar2")
+
+        # let messages expire
+        time.sleep(retention + wait_time)
+
+        # messages should have expired
+        result = aws_client.sqs.receive_message(QueueUrl=queue_url)
+        assert not result.get("Messages")
+
+    @markers.aws.validated
+    def test_message_retention_fifo(self, sqs_create_queue, aws_client, monkeypatch):
+        monkeypatch.setattr(config, "SQS_ENABLE_MESSAGE_RETENTION_PERIOD", True)
+        # in AWS, message retention is at least 60 seconds
+        if is_aws_cloud():
+            retention = 60
+            wait_time = 5
+        else:
+            retention = 2
+            wait_time = 1
+
+        queue_name = f"queue-{short_uid()}.fifo"
+        attributes = {
+            "FifoQueue": "true",
+            "MessageRetentionPeriod": str(retention),
+            "ContentBasedDeduplication": "true",
+        }
+        queue_url = sqs_create_queue(QueueName=queue_name, Attributes=attributes)
+
+        aws_client.sqs.send_message(QueueUrl=queue_url, MessageBody="foobar1", MessageGroupId="1")
+        aws_client.sqs.send_message(QueueUrl=queue_url, MessageBody="foobar2", MessageGroupId="2")
+
+        # let messages expire
+        time.sleep(retention + wait_time)
+
+        # messages should have expired
+        result = aws_client.sqs.receive_message(QueueUrl=queue_url)
+        assert not result.get("Messages")
+
+    @markers.aws.validated
+    def test_message_retention_with_inflight(self, sqs_create_queue, aws_client, monkeypatch):
+        # tests whether an inflight message is correctly removed after it expires
+        monkeypatch.setattr(config, "SQS_ENABLE_MESSAGE_RETENTION_PERIOD", True)
+
+        if is_aws_cloud():
+            message_retention_period = 60
+            wait_time = 5
+        else:
+            message_retention_period = 2
+            wait_time = 1
+
+        # by setting message_retention_period = visibility_timeout, we can keep the waiting logic simple
+        queue_url = sqs_create_queue(
+            Attributes={
+                "MessageRetentionPeriod": str(message_retention_period),
+                "VisibilityTimeout": str(message_retention_period),
+            }
+        )
+
+        aws_client.sqs.send_message(QueueUrl=queue_url, MessageBody="foobar1")
+        aws_client.sqs.send_message(QueueUrl=queue_url, MessageBody="foobar2")
+
+        # We need to wait for a bit so that once we receive the message, the visibility timeout
+        # expiration happens after the message expiration via message retention period
+        time.sleep(wait_time)
+        response = aws_client.sqs.receive_message(QueueUrl=queue_url, MaxNumberOfMessages=1)
+        assert response["Messages"][0]["Body"] == "foobar1"
+        receipt_handle = response["Messages"][0]["ReceiptHandle"]
+
+        # all messages should be removed after the retention policy timeframe has passed
+        time.sleep(message_retention_period + 1)
+
+        response = aws_client.sqs.receive_message(QueueUrl=queue_url)
+        assert not response.get("Messages")
+
+        # wait until the visibility timeout of the first receive message has expired, should be nonexistent
+        time.sleep(wait_time * 1.5)
+        response = aws_client.sqs.receive_message(QueueUrl=queue_url)
+        assert not response.get("Messages")
+
+        # try to delete the expired message
+        aws_client.sqs.delete_message(QueueUrl=queue_url, ReceiptHandle=receipt_handle)
+
     @markers.aws.needs_fixing
     @pytest.mark.skip("Needs AWS fixing and is now failing against LocalStack")
     def test_delete_message_batch_from_lambda(
@@ -1164,6 +1313,52 @@ class TestSqsProvider:
         result = requests.post(edge_url, data=payload, headers=headers)
         assert result.status_code == 200
         assert message_body in result.text
+
+    @markers.aws.validated
+    def test_fifo_message_group_visibility(self, sqs_create_queue, aws_client):
+        queue_url = sqs_create_queue(
+            QueueName=f"queue-{short_uid()}.fifo",
+            Attributes={
+                "FifoQueue": "true",
+                "VisibilityTimeout": "60",
+                "ContentBasedDeduplication": "true",
+            },
+        )
+
+        queue = Queue()
+
+        def _receive_message():
+            """Worker thread for receiving messages"""
+            response = aws_client.sqs.receive_message(
+                QueueUrl=queue_url, MaxNumberOfMessages=1, WaitTimeSeconds=10
+            )
+            if not response.get("Messages"):
+                return None
+            queue.put(response["Messages"][0])
+
+        # start three concurrent listeners
+        threading.Thread(target=_receive_message).start()
+        threading.Thread(target=_receive_message).start()
+        threading.Thread(target=_receive_message).start()
+
+        # send a message to the queue
+        aws_client.sqs.send_message(QueueUrl=queue_url, MessageBody="message-1", MessageGroupId="1")
+
+        # one worker should return immediately with the message and put the message group into "inflight"
+        message = queue.get(timeout=2)
+        assert message["Body"] == "message-1"
+
+        # sending new messages to the message group should not modify its visibility, so the message group is still
+        # in inflight mode, even after waiting 2 seconds on the message.
+        aws_client.sqs.send_message(QueueUrl=queue_url, MessageBody="message-2", MessageGroupId="1")
+        with pytest.raises(Empty):
+            # if the queue is not empty, it means one of the threads received a message when it shouldn't
+            queue.get(timeout=2)
+
+        # now we delete the original message, which should make the group visible immediately
+        aws_client.sqs.delete_message(QueueUrl=queue_url, ReceiptHandle=message["ReceiptHandle"])
+        message = queue.get(timeout=2)
+        assert message["Body"] == "message-2"
 
     @markers.aws.validated
     def test_fifo_messages_in_order_after_timeout(self, sqs_create_queue, aws_client):
@@ -1863,6 +2058,22 @@ class TestSqsProvider:
         with pytest.raises(ClientError) as e:
             aws_client.sqs.send_message_batch(QueueUrl=queue_url, Entries=message_batch)
         snapshot.match("test_missing_deduplication_id_for_fifo_queue", e.value.response)
+
+    @markers.aws.validated
+    @markers.snapshot.skip_snapshot_verify(paths=["$..Failed..Code", "$..Failed..Message"])
+    def test_send_batch_message_size(self, sqs_create_queue, snapshot, aws_client):
+        # message and code are slightly different because of the way SQS exception serialization works
+        queue_url = sqs_create_queue(
+            Attributes={
+                "MaximumMessageSize": "1024",
+            },
+        )
+        message_batch = [
+            {"Id": "a4cff0d1-1961-44bd-ae53-c6d5ed71ed08", "MessageBody": "a" * 1024},
+            {"Id": "35b535ed-b76a-4ebd-b749-6eb35cdb55ee", "MessageBody": "a" * 1025},
+        ]
+        response = aws_client.sqs.send_message_batch(QueueUrl=queue_url, Entries=message_batch)
+        snapshot.match("send-message-batch-result", response)
 
     @markers.parity.aws_validated
     def test_send_batch_missing_message_group_id_for_fifo_queue(
