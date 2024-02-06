@@ -630,7 +630,9 @@ class S3Provider(S3Api, ServiceLifecycleHook):
         body = request.get("Body")
         # check if chunked request
         headers = context.request.headers
-        is_aws_chunked = headers.get("x-amz-content-sha256", "").startswith("STREAMING-")
+        is_aws_chunked = headers.get("x-amz-content-sha256", "").startswith(
+            "STREAMING-"
+        ) or "aws-chunked" in headers.get("content-encoding", "")
         if is_aws_chunked:
             decoded_content_length = int(headers.get("x-amz-decoded-content-length", 0))
             body = AwsChunkedDecoder(body, decoded_content_length, s3_object=s3_object)
@@ -1876,7 +1878,9 @@ class S3Provider(S3Api, ServiceLifecycleHook):
         )
         body = request.get("Body")
         headers = context.request.headers
-        is_aws_chunked = headers.get("x-amz-content-sha256", "").startswith("STREAMING-")
+        is_aws_chunked = headers.get("x-amz-content-sha256", "").startswith(
+            "STREAMING-"
+        ) or "aws-chunked" in headers.get("content-encoding", "")
         # check if chunked request
         if is_aws_chunked:
             decoded_content_length = int(headers.get("x-amz-decoded-content-length", 0))
@@ -2892,9 +2896,9 @@ class S3Provider(S3Api, ServiceLifecycleHook):
         expected_bucket_owner: AccountId = None,
     ) -> PutObjectLockConfigurationOutput:
         store, s3_bucket = self._get_cross_account_bucket(context, bucket)
-        if not s3_bucket.object_lock_enabled:
+        if s3_bucket.versioning_status != "Enabled":
             raise InvalidBucketState(
-                "Object Lock configuration cannot be enabled on existing buckets"
+                "Versioning must be 'Enabled' on the bucket to apply a Object Lock configuration"
             )
 
         if (
@@ -2905,6 +2909,9 @@ class S3Provider(S3Api, ServiceLifecycleHook):
 
         if "Rule" not in object_lock_configuration:
             s3_bucket.object_lock_default_retention = None
+            if not s3_bucket.object_lock_enabled:
+                s3_bucket.object_lock_enabled = True
+
             return PutObjectLockConfigurationOutput()
         elif not (rule := object_lock_configuration["Rule"]) or not (
             default_retention := rule.get("DefaultRetention")
@@ -2918,6 +2925,8 @@ class S3Provider(S3Api, ServiceLifecycleHook):
             raise MalformedXML()
 
         s3_bucket.object_lock_default_retention = default_retention
+        if not s3_bucket.object_lock_enabled:
+            s3_bucket.object_lock_enabled = True
 
         return PutObjectLockConfigurationOutput()
 

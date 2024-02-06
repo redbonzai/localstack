@@ -6,12 +6,14 @@ import logging
 import re
 import threading
 import time
+from datetime import datetime
 from queue import Empty, PriorityQueue, Queue
 from typing import Dict, Optional, Set
 
 from localstack import config
 from localstack.aws.api import RequestContext
 from localstack.aws.api.sqs import (
+    AttributeNameList,
     InvalidAttributeName,
     Message,
     QueueAttributeMap,
@@ -27,11 +29,13 @@ from localstack.services.sqs.exceptions import (
 )
 from localstack.services.sqs.utils import (
     decode_receipt_handle,
+    encode_move_task_handle,
     encode_receipt_handle,
     global_message_sequence,
     is_message_deduplication_id_required,
 )
 from localstack.services.stores import AccountRegionBundle, BaseStore, LocalAttribute
+from localstack.utils.strings import long_uid
 from localstack.utils.time import now
 from localstack.utils.urls import localstack_host
 
@@ -185,6 +189,54 @@ class ReceiveMessageResult:
         self.dead_letter_messages = []
 
 
+class MessageMoveTaskStatus(str):
+    CREATED = "CREATED"  # not validated, for internal use
+    RUNNING = "RUNNING"
+    COMPLETED = "COMPLETED"
+    CANCELLING = "CANCELLING"
+    CANCELLED = "CANCELLED"
+    FAILED = "FAILED"
+
+
+class MessageMoveTask:
+    """
+    A task created by the ``StartMessageMoveTask`` operation.
+    """
+
+    # configurable fields
+    source_arn: str
+    destination_arn: str
+    max_number_of_messages_per_second: int | None = None
+
+    # dynamic fields
+    task_id: str
+    status: str = MessageMoveTaskStatus.CREATED
+    started_timestamp: datetime | None = None
+    approximate_number_of_messages_moved: int | None = None
+    approximate_number_of_messages_to_move: int | None = None
+    failure_reason: str | None = None
+
+    cancel_event: threading.Event
+
+    def __init__(
+        self, source_arn: str, destination_arn: str, max_number_of_messages_per_second: int = None
+    ):
+        self.task_id = long_uid()
+        self.source_arn = source_arn
+        self.destination_arn = destination_arn
+        self.max_number_of_messages_per_second = max_number_of_messages_per_second
+        self.cancel_event = threading.Event()
+
+    def mark_started(self):
+        self.started_timestamp = datetime.utcnow()
+        self.status = MessageMoveTaskStatus.RUNNING
+        self.cancel_event.clear()
+
+    @property
+    def task_handle(self) -> str:
+        return encode_move_task_handle(self.task_id, self.source_arn)
+
+
 class SqsQueue:
     name: str
     region: str
@@ -294,6 +346,12 @@ class SqsQueue:
         elif config.SQS_ENDPOINT_STRATEGY == "path":
             # https?://localhost:4566/queue/us-east-1/00000000000/my-queue (us-east-1)
             host_url = f"{scheme}://{host_definition.host_and_port()}/queue/{self.region}"
+        elif config.SQS_ENDPOINT_STRATEGY == "dynamic":
+            # undocumented strategy to help unblock folks who depended on the feature previously,
+            # especially when running localstack in the container on a different port than the one exposed
+            # by docker (let's say :<random-port>->:4566/tcp.). however, this should be handled in a more
+            # fundamental way in localstack.
+            host_url = f"{context.request.host_url.rstrip('/')}/queue/{self.region}"
         else:
             host_url = f"{scheme}://{host_definition.host_and_port()}"
 
@@ -584,6 +642,31 @@ class SqsQueue:
         else:
             del self.attributes[QueueAttributeName.Policy]
 
+    def get_queue_attributes(self, attribute_names: AttributeNameList = None) -> dict[str, str]:
+        if not attribute_names:
+            return {}
+
+        if QueueAttributeName.All in attribute_names:
+            attribute_names = self.attributes.keys()
+
+        result: Dict[QueueAttributeName, str] = {}
+
+        for attr in attribute_names:
+            try:
+                getattr(QueueAttributeName, attr)
+            except AttributeError:
+                raise InvalidAttributeName(f"Unknown Attribute {attr}.")
+
+            value = self.attributes.get(attr)
+            if callable(value):
+                func = value
+                value = func()
+                if value is not None:
+                    result[attr] = value
+            elif value is not None:
+                result[attr] = value
+        return result
+
     @staticmethod
     def remove_expired_messages_from_heap(
         heap: list[SqsMessage], message_retention_period: int
@@ -640,12 +723,12 @@ class StandardQueue(SqsQueue):
         if message_deduplication_id:
             raise InvalidParameterValueException(
                 f"Value {message_deduplication_id} for parameter MessageDeduplicationId is invalid. Reason: The "
-                f"request includes a parameter that is not valid for this queue type. "
+                f"request includes a parameter that is not valid for this queue type."
             )
         if message_group_id:
             raise InvalidParameterValueException(
                 f"Value {message_group_id} for parameter MessageGroupId is invalid. Reason: The request includes a "
-                f"parameter that is not valid for this queue type. "
+                f"parameter that is not valid for this queue type."
             )
 
         standard_message = SqsMessage(time.time(), message)
@@ -1136,6 +1219,9 @@ class SqsStore(BaseStore):
     queues: Dict[str, SqsQueue] = LocalAttribute(default=dict)
 
     deleted: Dict[str, float] = LocalAttribute(default=dict)
+
+    move_tasks: Dict[str, MessageMoveTask] = LocalAttribute(default=dict)
+    """Maps task IDs to their ``MoveMessageTask`` object. Task IDs can be found by decoding a task handle."""
 
     def expire_deleted(self):
         for k in list(self.deleted.keys()):
