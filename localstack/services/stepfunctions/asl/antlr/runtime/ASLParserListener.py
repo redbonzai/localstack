@@ -8,6 +8,15 @@ else:
 # This class defines a complete listener for a parse tree produced by ASLParser.
 class ASLParserListener(ParseTreeListener):
 
+    # Enter a parse tree produced by ASLParser#state_machine.
+    def enterState_machine(self, ctx:ASLParser.State_machineContext):
+        pass
+
+    # Exit a parse tree produced by ASLParser#state_machine.
+    def exitState_machine(self, ctx:ASLParser.State_machineContext):
+        pass
+
+
     # Enter a parse tree produced by ASLParser#program_decl.
     def enterProgram_decl(self, ctx:ASLParser.Program_declContext):
         pass
@@ -788,6 +797,24 @@ class ASLParserListener(ParseTreeListener):
 
     # Exit a parse tree produced by ASLParser#backoff_rate_decl.
     def exitBackoff_rate_decl(self, ctx:ASLParser.Backoff_rate_declContext):
+        pass
+
+
+    # Enter a parse tree produced by ASLParser#max_delay_seconds_decl.
+    def enterMax_delay_seconds_decl(self, ctx:ASLParser.Max_delay_seconds_declContext):
+        pass
+
+    # Exit a parse tree produced by ASLParser#max_delay_seconds_decl.
+    def exitMax_delay_seconds_decl(self, ctx:ASLParser.Max_delay_seconds_declContext):
+        pass
+
+
+    # Enter a parse tree produced by ASLParser#jitter_strategy_decl.
+    def enterJitter_strategy_decl(self, ctx:ASLParser.Jitter_strategy_declContext):
+        pass
+
+    # Exit a parse tree produced by ASLParser#jitter_strategy_decl.
+    def exitJitter_strategy_decl(self, ctx:ASLParser.Jitter_strategy_declContext):
         pass
 
 
