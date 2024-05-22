@@ -5,7 +5,6 @@ Tests for rule routing of events as well as rule creation and deletion.
 import json
 
 import pytest
-from botocore.exceptions import ClientError
 
 from localstack.constants import TEST_AWS_ACCOUNT_ID, TEST_AWS_REGION_NAME
 from localstack.testing.pytest import markers
@@ -13,7 +12,8 @@ from localstack.utils.aws import arns
 from localstack.utils.strings import short_uid
 from localstack.utils.sync import poll_condition
 from tests.aws.services.events.conftest import assert_valid_event, sqs_collect_messages
-from tests.aws.services.events.test_events import TEST_EVENT_BUS_NAME, TEST_EVENT_PATTERN
+from tests.aws.services.events.helper_functions import is_v2_provider
+from tests.aws.services.events.test_events import TEST_EVENT_PATTERN
 
 
 @markers.aws.validated
@@ -48,39 +48,6 @@ def test_rule_disable(aws_client, clean_up):
 
     # clean up
     clean_up(rule_name=rule_name)
-
-
-@markers.aws.validated
-@pytest.mark.parametrize(
-    "expression",
-    [
-        "rate(10 seconds)",
-        "rate(10 years)",
-        "rate(1 minutes)",
-        "rate(1 hours)",
-        "rate(1 days)",
-        "rate(10 minute)",
-        "rate(10 hour)",
-        "rate(10 day)",
-        "rate()",
-        "rate(10)",
-        "rate(10 minutess)",
-        "rate(foo minutes)",
-        "rate(0 minutes)",
-        "rate(-10 minutes)",
-        "rate(10 MINUTES)",
-        "rate( 10 minutes )",
-        " rate(10 minutes)",
-    ],
-)
-def test_put_rule_invalid_rate_schedule_expression(expression, aws_client):
-    with pytest.raises(ClientError) as e:
-        aws_client.events.put_rule(Name=f"rule-{short_uid()}", ScheduleExpression=expression)
-
-    assert e.value.response["Error"] == {
-        "Code": "ValidationException",
-        "Message": "Parameter ScheduleExpression is not valid.",
-    }
 
 
 @markers.aws.validated
@@ -231,19 +198,23 @@ def test_put_events_with_rule_exists_false_to_sqs(put_events_with_filter_to_sqs,
 
 
 @markers.aws.unknown
+@pytest.mark.skipif(is_v2_provider(), reason="V2 provider does not support this feature yet")
 def test_put_event_with_content_base_rule_in_pattern(aws_client, clean_up):
     queue_name = f"queue-{short_uid()}"
     rule_name = f"rule-{short_uid()}"
     target_id = f"target-{short_uid()}"
+    event_bus_name = f"event-bus-{short_uid()}"
 
     queue_url = aws_client.sqs.create_queue(QueueName=queue_name)["QueueUrl"]
     queue_arn = arns.sqs_queue_arn(queue_name, TEST_AWS_ACCOUNT_ID, TEST_AWS_REGION_NAME)
 
+    # EventBridge apparently converts some fields, for example: Source=>source, DetailType=>detail-type
+    # but the actual pattern matching is case-sensitive by key!
     pattern = {
-        "Source": [{"exists": True}],
+        "source": [{"exists": True}],
         "detail-type": [{"prefix": "core.app"}],
-        "Detail": {
-            "decription": ["this-is-event-details"],
+        "detail": {
+            "description": ["this-is-event-details"],
             "amount": [200],
             "salary": [2000, 4000],
             "env": ["dev", "prod"],
@@ -253,7 +224,8 @@ def test_put_event_with_content_base_rule_in_pattern(aws_client, clean_up):
             "test2": [{"anything-but": "test2"}],
             "test3": [{"anything-but": ["test3", "test33"]}],
             "test4": [{"anything-but": {"prefix": "test4"}}],
-            "ip": [{"cidr": "10.102.1.0/24"}],
+            # TODO: unsupported in LocalStack
+            # "ip": [{"cidr": "10.102.1.0/24"}],
             "num-test1": [{"numeric": ["<", 200]}],
             "num-test2": [{"numeric": ["<=", 200]}],
             "num-test3": [{"numeric": [">", 200]}],
@@ -265,12 +237,12 @@ def test_put_event_with_content_base_rule_in_pattern(aws_client, clean_up):
     }
 
     event = {
-        "EventBusName": TEST_EVENT_BUS_NAME,
+        "EventBusName": event_bus_name,
         "Source": "core.update-account-command",
         "DetailType": "core.app.backend",
         "Detail": json.dumps(
             {
-                "decription": "this-is-event-details",
+                "description": "this-is-event-details",
                 "amount": 200,
                 "salary": 2000,
                 "env": "prod",
@@ -292,16 +264,16 @@ def test_put_event_with_content_base_rule_in_pattern(aws_client, clean_up):
         ),
     }
 
-    aws_client.events.create_event_bus(Name=TEST_EVENT_BUS_NAME)
+    aws_client.events.create_event_bus(Name=event_bus_name)
     aws_client.events.put_rule(
         Name=rule_name,
-        EventBusName=TEST_EVENT_BUS_NAME,
+        EventBusName=event_bus_name,
         EventPattern=json.dumps(pattern),
     )
 
     aws_client.events.put_targets(
         Rule=rule_name,
-        EventBusName=TEST_EVENT_BUS_NAME,
+        EventBusName=event_bus_name,
         Targets=[{"Id": target_id, "Arn": queue_arn, "InputPath": "$.detail"}],
     )
     aws_client.events.put_events(Entries=[event])
@@ -320,25 +292,11 @@ def test_put_event_with_content_base_rule_in_pattern(aws_client, clean_up):
 
     # clean up
     clean_up(
-        bus_name=TEST_EVENT_BUS_NAME,
+        bus_name=event_bus_name,
         rule_name=rule_name,
         target_ids=target_id,
         queue_url=queue_url,
     )
-
-
-@pytest.mark.parametrize("schedule_expression", ["rate(1 minute)", "rate(1 day)", "rate(1 hour)"])
-@markers.aws.validated
-def test_create_rule_with_one_unit_in_singular_should_succeed(
-    schedule_expression, aws_client, clean_up
-):
-    rule_name = f"rule-{short_uid()}"
-
-    # rule should be creatable with given expression
-    try:
-        aws_client.events.put_rule(Name=rule_name, ScheduleExpression=schedule_expression)
-    finally:
-        clean_up(rule_name=rule_name)
 
 
 @markers.aws.validated

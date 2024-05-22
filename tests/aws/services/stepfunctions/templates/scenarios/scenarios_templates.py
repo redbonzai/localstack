@@ -12,8 +12,14 @@ class ScenariosTemplate(TemplateLoader):
         _THIS_FOLDER, "statemachines/catch_states_runtime.json5"
     )
     PARALLEL_STATE: Final[str] = os.path.join(_THIS_FOLDER, "statemachines/parallel_state.json5")
+    MAX_CONCURRENCY: Final[str] = os.path.join(
+        _THIS_FOLDER, "statemachines/max_concurrency_path.json5"
+    )
     PARALLEL_STATE_FAIL: Final[str] = os.path.join(
         _THIS_FOLDER, "statemachines/parallel_state_fail.json5"
+    )
+    PARALLEL_NESTED_NESTED: Final[str] = os.path.join(
+        _THIS_FOLDER, "statemachines/parallel_state_nested.json5"
     )
     PARALLEL_STATE_CATCH: Final[str] = os.path.join(
         _THIS_FOLDER, "statemachines/parallel_state_catch.json5"
@@ -52,11 +58,23 @@ class ScenariosTemplate(TemplateLoader):
     MAP_STATE_CONFIG_DISTRIBUTED_ITEM_SELECTOR: Final[str] = os.path.join(
         _THIS_FOLDER, "statemachines/map_state_config_distributed_item_selector.json5"
     )
+    MAP_STATE_LEGACY_REENTRANT: Final[str] = os.path.join(
+        _THIS_FOLDER, "statemachines/map_state_legacy_reentrant.json5"
+    )
+    MAP_STATE_CONFIG_DISTRIBUTED_REENTRANT: Final[str] = os.path.join(
+        _THIS_FOLDER, "statemachines/map_state_config_distributed_reentrant.json5"
+    )
+    MAP_STATE_CONFIG_DISTRIBUTED_REENTRANT_LAMBDA: Final[str] = os.path.join(
+        _THIS_FOLDER, "statemachines/map_state_config_distributed_reentrant_lambda.json5"
+    )
     MAP_STATE_CONFIG_INLINE_PARAMETERS: Final[str] = os.path.join(
         _THIS_FOLDER, "statemachines/map_state_config_inline_parameters.json5"
     )
     MAP_STATE_CONFIG_INLINE_ITEM_SELECTOR: Final[str] = os.path.join(
         _THIS_FOLDER, "statemachines/map_state_config_inline_item_selector.json5"
+    )
+    MAP_STATE_NESTED: Final[str] = os.path.join(
+        _THIS_FOLDER, "statemachines/map_state_nested.json5"
     )
     MAP_STATE_NO_PROCESSOR_CONFIG: Final[str] = os.path.join(
         _THIS_FOLDER, "statemachines/map_state_no_processor_config.json5"
@@ -100,6 +118,9 @@ class ScenariosTemplate(TemplateLoader):
     )
     MAP_STATE_CATCH_LEGACY: Final[str] = os.path.join(
         _THIS_FOLDER, "statemachines/map_state_catch_legacy.json5"
+    )
+    MAP_STATE_LEGACY_REENTRANT: Final[str] = os.path.join(
+        _THIS_FOLDER, "statemachines/map_state_legacy_reentrant.json5"
     )
     MAP_STATE_RETRY: Final[str] = os.path.join(_THIS_FOLDER, "statemachines/map_state_retry.json5")
     MAP_STATE_RETRY_LEGACY: Final[str] = os.path.join(

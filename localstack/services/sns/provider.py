@@ -1,6 +1,8 @@
+import base64
 import json
 import logging
 from typing import Dict, List
+from uuid import uuid4
 
 from botocore.utils import InvalidArnException
 from moto.core.utils import camelcase_to_pascal, underscores_to_camelcase
@@ -8,7 +10,7 @@ from moto.sns import sns_backends
 from moto.sns.models import MAXIMUM_MESSAGE_LENGTH, SNSBackend, Topic
 from moto.sns.utils import is_e164
 
-from localstack.aws.api import CommonServiceException, RequestContext
+from localstack.aws.api import RequestContext
 from localstack.aws.api.sns import (
     AmazonResourceName,
     BatchEntryIdsNotDistinctException,
@@ -21,6 +23,8 @@ from localstack.aws.api.sns import (
     GetTopicAttributesResponse,
     InvalidParameterException,
     InvalidParameterValueException,
+    ListSubscriptionsByTopicResponse,
+    ListSubscriptionsResponse,
     ListTagsForResourceResponse,
     MapStringToString,
     MessageAttributeMap,
@@ -32,6 +36,7 @@ from localstack.aws.api.sns import (
     SnsApi,
     String,
     SubscribeResponse,
+    Subscription,
     SubscriptionAttributesMap,
     TagKeyList,
     TagList,
@@ -44,6 +49,7 @@ from localstack.aws.api.sns import (
     authenticateOnUnsubscribe,
     boolean,
     messageStructure,
+    nextToken,
     subscriptionARN,
     topicARN,
     topicName,
@@ -55,6 +61,7 @@ from localstack.services.moto import call_moto
 from localstack.services.plugins import ServiceLifecycleHook
 from localstack.services.sns import constants as sns_constants
 from localstack.services.sns.certificate import SNS_SERVER_CERT
+from localstack.services.sns.filter import FilterPolicyValidator
 from localstack.services.sns.models import SnsMessage, SnsStore, SnsSubscription, sns_stores
 from localstack.services.sns.publisher import (
     PublishDispatcher,
@@ -67,7 +74,8 @@ from localstack.utils.aws.arns import (
     extract_region_from_arn,
     parse_arn,
 )
-from localstack.utils.strings import short_uid
+from localstack.utils.collections import PaginatedList, select_from_typed_dict
+from localstack.utils.strings import short_uid, to_bytes, to_str
 
 # set up logger
 LOG = logging.getLogger(__name__)
@@ -264,19 +272,19 @@ class SnsProvider(SnsApi, ServiceLifecycleHook):
             topic_arn=sub["TopicArn"],
             endpoint=sub["Endpoint"],
         )
-        try:
-            call_moto(context)
-        except CommonServiceException as e:
-            # Moto errors don't send the "Type": "Sender" field in their SNS exception
-            if e.code == "InvalidParameter":
-                raise InvalidParameterException(e.message)
-            raise
+        if attribute_name == "RawMessageDelivery":
+            attribute_value = attribute_value.lower()
 
-        if attribute_name == "FilterPolicy":
-            store = self.get_store(account_id=context.account_id, region_name=context.region)
-            store.subscription_filter_policy[subscription_arn] = (
-                json.loads(attribute_value) if attribute_value else None
-            )
+        elif attribute_name == "FilterPolicy":
+            filter_policy = json.loads(attribute_value) if attribute_value else None
+            if filter_policy:
+                validator = FilterPolicyValidator(
+                    scope=sub.get("FilterPolicyScope", "MessageAttributes"),
+                    is_subscribe_call=False,
+                )
+                validator.validate_filter_policy(filter_policy)
+
+            store.subscription_filter_policy[subscription_arn] = filter_policy
 
         sub[attribute_name] = attribute_value
 
@@ -443,6 +451,46 @@ class SnsProvider(SnsApi, ServiceLifecycleHook):
         attributes = {k: v for k, v in sub.items() if k not in removed_attrs}
         return GetSubscriptionAttributesResponse(Attributes=attributes)
 
+    def list_subscriptions(
+        self, context: RequestContext, next_token: nextToken = None, **kwargs
+    ) -> ListSubscriptionsResponse:
+        store = self.get_store(context.account_id, context.region)
+        subscriptions = [
+            select_from_typed_dict(Subscription, sub) for sub in list(store.subscriptions.values())
+        ]
+        paginated_subscriptions = PaginatedList(subscriptions)
+        page, next_token = paginated_subscriptions.get_page(
+            token_generator=lambda x: get_next_page_token_from_arn(x["SubscriptionArn"]),
+            page_size=100,
+            next_token=next_token,
+        )
+
+        response = ListSubscriptionsResponse(Subscriptions=page)
+        if next_token:
+            response["NextToken"] = next_token
+        return response
+
+    def list_subscriptions_by_topic(
+        self, context: RequestContext, topic_arn: topicARN, next_token: nextToken = None, **kwargs
+    ) -> ListSubscriptionsByTopicResponse:
+        self._get_topic(topic_arn, context)
+        parsed_topic_arn = parse_and_validate_topic_arn(topic_arn)
+        store = self.get_store(parsed_topic_arn["account"], parsed_topic_arn["region"])
+        sns_subscriptions = store.get_topic_subscriptions(topic_arn)
+        subscriptions = [select_from_typed_dict(Subscription, sub) for sub in sns_subscriptions]
+
+        paginated_subscriptions = PaginatedList(subscriptions)
+        page, next_token = paginated_subscriptions.get_page(
+            token_generator=lambda x: get_next_page_token_from_arn(x["SubscriptionArn"]),
+            page_size=100,
+            next_token=next_token,
+        )
+
+        response = ListSubscriptionsResponse(Subscriptions=page)
+        if next_token:
+            response["NextToken"] = next_token
+        return response
+
     def publish(
         self,
         context: RequestContext,
@@ -581,6 +629,10 @@ class SnsProvider(SnsApi, ServiceLifecycleHook):
         return_subscription_arn: boolean = None,
         **kwargs,
     ) -> SubscribeResponse:
+        # TODO: check validation ordering
+        parsed_topic_arn = parse_and_validate_topic_arn(topic_arn)
+        store = self.get_store(account_id=parsed_topic_arn["account"], region_name=context.region)
+
         if not endpoint:
             # TODO: check AWS behaviour (because endpoint is optional)
             raise NotFoundException("Endpoint not specified in subscription")
@@ -601,6 +653,14 @@ class SnsProvider(SnsApi, ServiceLifecycleHook):
             except InvalidArnException:
                 raise InvalidParameterException("Invalid parameter: SQS endpoint ARN")
 
+        elif protocol == "application":
+            # TODO: this is taken from moto, validate it
+            moto_backend = self.get_moto_backend(
+                account_id=parsed_topic_arn["account"], region_name=context.region
+            )
+            if endpoint not in moto_backend.platform_endpoints:
+                raise NotFoundException("Endpoint does not exist")
+
         if ".fifo" in endpoint and ".fifo" not in topic_arn:
             raise InvalidParameterException(
                 "Invalid parameter: Invalid parameter: Endpoint Reason: FIFO SQS Queues can not be subscribed to standard SNS topics"
@@ -613,13 +673,8 @@ class SnsProvider(SnsApi, ServiceLifecycleHook):
                     attribute_value=attr_value,
                     topic_arn=topic_arn,
                     endpoint=endpoint,
+                    is_subscribe_call=True,
                 )
-
-        moto_response = call_moto(context)
-        subscription_arn = moto_response.get("SubscriptionArn")
-        parsed_topic_arn = parse_and_validate_topic_arn(topic_arn)
-
-        store = self.get_store(account_id=parsed_topic_arn["account"], region_name=context.region)
 
         # An endpoint may only be subscribed to a topic once. Subsequent
         # subscribe calls do nothing (subscribe is idempotent), except if its attributes are different.
@@ -640,6 +695,7 @@ class SnsProvider(SnsApi, ServiceLifecycleHook):
         principal = sns_constants.DUMMY_SUBSCRIPTION_PRINCIPAL.replace(
             "{{account_id}}", context.account_id
         )
+        subscription_arn = create_subscription_arn(topic_arn)
         subscription = SnsSubscription(
             # http://docs.aws.amazon.com/cli/latest/reference/sns/get-subscription-attributes.html
             TopicArn=topic_arn,
@@ -648,27 +704,41 @@ class SnsProvider(SnsApi, ServiceLifecycleHook):
             SubscriptionArn=subscription_arn,
             PendingConfirmation="true",
             Owner=context.account_id,
-            RawMessageDelivery="false",  # default value, will be overriden if set
-            FilterPolicyScope="MessageAttributes",  # default value, will be overriden if set
+            RawMessageDelivery="false",  # default value, will be overridden if set
+            FilterPolicyScope="MessageAttributes",  # default value, will be overridden if set
             SubscriptionPrincipal=principal,  # dummy value, could be fetched with a call to STS?
         )
         if attributes:
             subscription.update(attributes)
             if "FilterPolicy" in attributes:
+                filter_policy = (
+                    json.loads(attributes["FilterPolicy"]) if attributes["FilterPolicy"] else None
+                )
+                if filter_policy:
+                    validator = FilterPolicyValidator(
+                        scope=attributes.get("FilterPolicyScope", "MessageAttributes"),
+                        is_subscribe_call=True,
+                    )
+                    validator.validate_filter_policy(filter_policy)
+
                 store.subscription_filter_policy[subscription_arn] = (
                     json.loads(attributes["FilterPolicy"]) if attributes["FilterPolicy"] else None
                 )
 
+            if raw_msg_delivery := attributes.get("RawMessageDelivery"):
+                subscription["RawMessageDelivery"] = raw_msg_delivery.lower()
+
         store.subscriptions[subscription_arn] = subscription
 
-        topic_subscription = store.topic_subscriptions.setdefault(topic_arn, [])
-        topic_subscription.append(subscription_arn)
+        topic_subscriptions = store.topic_subscriptions.setdefault(topic_arn, [])
+        topic_subscriptions.append(subscription_arn)
 
         # store the token and subscription arn
         # TODO: the token is a 288 hex char string
         subscription_token = encode_subscription_token_with_region(region=context.region)
         store.subscription_tokens[subscription_token] = subscription_arn
 
+        response_subscription_arn = subscription_arn
         # Send out confirmation message for HTTP(S), fix for https://github.com/localstack/localstack/issues/881
         if protocol in ["http", "https"]:
             message_ctx = SnsMessage(
@@ -687,6 +757,9 @@ class SnsProvider(SnsApi, ServiceLifecycleHook):
                 topic_arn=topic_arn,
                 subscription_arn=subscription_arn,
             )
+            if not return_subscription_arn:
+                response_subscription_arn = "pending confirmation"
+
         elif protocol not in ["email", "email-json"]:
             # Only HTTP(S) and email subscriptions are not auto validated
             # Except if the endpoint and the topic are not in the same AWS account, then you'd need to manually confirm
@@ -697,7 +770,8 @@ class SnsProvider(SnsApi, ServiceLifecycleHook):
             # if parsed_topic_arn["account"] == endpoint account (depending on the type, SQS, lambda, parse the arn)
             subscription["PendingConfirmation"] = "false"
             subscription["ConfirmationWasAuthenticated"] = "true"
-        return SubscribeResponse(SubscriptionArn=subscription_arn)
+
+        return SubscribeResponse(SubscriptionArn=response_subscription_arn)
 
     def tag_resource(
         self, context: RequestContext, resource_arn: AmazonResourceName, tags: TagList, **kwargs
@@ -770,6 +844,7 @@ def validate_subscription_attribute(
     attribute_value: str,
     topic_arn: str,
     endpoint: str,
+    is_subscribe_call: bool = False,
 ) -> None:
     """
     Validate the subscription attribute to be set. See:
@@ -778,40 +853,45 @@ def validate_subscription_attribute(
     :param attribute_value: the subscription attribute value
     :param topic_arn: the topic_arn of the subscription, needed to know if it is FIFO
     :param endpoint: the subscription endpoint (like an SQS queue ARN)
+    :param is_subscribe_call: the error message is different if called from Subscribe or SetSubscriptionAttributes
     :raises InvalidParameterException
     :return:
     """
+    error_prefix = (
+        "Invalid parameter: Attributes Reason: " if is_subscribe_call else "Invalid parameter: "
+    )
     if attribute_name not in sns_constants.VALID_SUBSCRIPTION_ATTR_NAME:
-        raise InvalidParameterException("Invalid parameter: AttributeName")
+        raise InvalidParameterException(f"{error_prefix}AttributeName")
 
     if attribute_name == "FilterPolicy":
         try:
             json.loads(attribute_value or "{}")
         except json.JSONDecodeError:
-            raise InvalidParameterException(
-                "Invalid parameter: FilterPolicy: failed to parse JSON."
-            )
+            raise InvalidParameterException(f"{error_prefix}FilterPolicy: failed to parse JSON.")
     elif attribute_name == "FilterPolicyScope":
         if attribute_value not in ("MessageAttributes", "MessageBody"):
             raise InvalidParameterException(
-                f"Invalid parameter: FilterPolicyScope: Invalid value [{attribute_value}]. Please use either MessageBody or MessageAttributes"
+                f"{error_prefix}FilterPolicyScope: Invalid value [{attribute_value}]. "
+                f"Please use either MessageBody or MessageAttributes"
             )
     elif attribute_name == "RawMessageDelivery":
         # TODO: only for SQS and https(s) subs, + firehose
-        return
+        if attribute_value.lower() not in ("true", "false"):
+            raise InvalidParameterException(
+                f"{error_prefix}RawMessageDelivery: Invalid value [{attribute_value}]. "
+                f"Must be true or false."
+            )
 
     elif attribute_name == "RedrivePolicy":
         try:
             dlq_target_arn = json.loads(attribute_value).get("deadLetterTargetArn", "")
         except json.JSONDecodeError:
-            raise InvalidParameterException(
-                "Invalid parameter: RedrivePolicy: failed to parse JSON."
-            )
+            raise InvalidParameterException(f"{error_prefix}RedrivePolicy: failed to parse JSON.")
         try:
             parsed_arn = parse_arn(dlq_target_arn)
         except InvalidArnException:
             raise InvalidParameterException(
-                "Invalid parameter: RedrivePolicy: deadLetterTargetArn is an invalid arn"
+                f"{error_prefix}RedrivePolicy: deadLetterTargetArn is an invalid arn"
             )
 
         if topic_arn.endswith(".fifo"):
@@ -819,7 +899,7 @@ def validate_subscription_attribute(
                 not parsed_arn["resource"].endswith(".fifo") or "sqs" not in parsed_arn["service"]
             ):
                 raise InvalidParameterException(
-                    "Invalid parameter: RedrivePolicy: must use a FIFO queue as DLQ for a FIFO Subscription to a FIFO Topic."
+                    f"{error_prefix}RedrivePolicy: must use a FIFO queue as DLQ for a FIFO Subscription to a FIFO Topic."
                 )
 
 
@@ -919,6 +999,12 @@ def parse_and_validate_topic_arn(topic_arn: str | None) -> ArnData:
         )
 
 
+def create_subscription_arn(topic_arn: str) -> str:
+    # This is the format of a Subscription ARN
+    # arn:aws:sns:us-west-2:123456789012:my-topic:8a21d249-4329-4871-acc6-7be709c6ea7f
+    return f"{topic_arn}:{uuid4()}"
+
+
 def encode_subscription_token_with_region(region: str) -> str:
     """
     Create a 64 characters Subscription Token with the region encoded
@@ -940,6 +1026,10 @@ def get_region_from_subscription_token(token: str) -> str:
         return bytes.fromhex(region).decode("utf-8")
     except (IndexError, ValueError, TypeError, UnicodeDecodeError):
         raise InvalidParameterException("Invalid parameter: Token")
+
+
+def get_next_page_token_from_arn(resource_arn: str) -> str:
+    return to_str(base64.b64encode(to_bytes(resource_arn)))
 
 
 def register_sns_api_resource(router: Router):

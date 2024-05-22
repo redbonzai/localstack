@@ -653,8 +653,19 @@
     }
   },
   "tests/aws/services/sns/test_sns.py::TestSNSSubscriptionCrud::test_create_subscriptions_with_attributes": {
-    "recorded-date": "24-08-2023, 23:27:53",
+    "recorded-date": "29-03-2024, 19:44:43",
     "recorded-content": {
+      "subscribe-wrong-attr": {
+        "Error": {
+          "Code": "InvalidParameter",
+          "Message": "Invalid parameter: Attributes Reason: RawMessageDelivery: Invalid value [wrongvalue]. Must be true or false.",
+          "Type": "Sender"
+        },
+        "ResponseMetadata": {
+          "HTTPHeaders": {},
+          "HTTPStatusCode": 400
+        }
+      },
       "subscribe": {
         "SubscriptionArn": "arn:aws:sns:<region>:111111111111:<resource:4>:<resource:1>",
         "ResponseMetadata": {
@@ -755,12 +766,34 @@
     }
   },
   "tests/aws/services/sns/test_sns.py::TestSNSSubscriptionCrud::test_validate_set_sub_attributes": {
-    "recorded-date": "24-08-2023, 23:27:58",
+    "recorded-date": "29-03-2024, 19:30:24",
     "recorded-content": {
       "fake-attribute": {
         "Error": {
           "Code": "InvalidParameter",
           "Message": "Invalid parameter: AttributeName",
+          "Type": "Sender"
+        },
+        "ResponseMetadata": {
+          "HTTPHeaders": {},
+          "HTTPStatusCode": 400
+        }
+      },
+      "raw-message-wrong-value": {
+        "Error": {
+          "Code": "InvalidParameter",
+          "Message": "Invalid parameter: RawMessageDelivery: Invalid value [test-ValUe]. Must be true or false.",
+          "Type": "Sender"
+        },
+        "ResponseMetadata": {
+          "HTTPHeaders": {},
+          "HTTPStatusCode": 400
+        }
+      },
+      "raw-message-empty-value": {
+        "Error": {
+          "Code": "InvalidParameter",
+          "Message": "Invalid parameter: RawMessageDelivery: Invalid value []. Must be true or false.",
           "Type": "Sender"
         },
         "ResponseMetadata": {
@@ -782,7 +815,7 @@
       "invalid-json-redrive-policy": {
         "Error": {
           "Code": "InvalidParameter",
-          "Message": "Invalid parameter: RedrivePolicy: failed to parse JSON. Unexpected character ('i' (code 105)): was expecting double-quote to start field name\n at [Source: java.io.StringReader@5498a819; line: 1, column: 3]",
+          "Message": "Invalid parameter: RedrivePolicy: failed to parse JSON. Unexpected character ('i' (code 105)): was expecting double-quote to start field name\n at [Source: java.io.StringReader@469cc9aa; line: 1, column: 3]",
           "Type": "Sender"
         },
         "ResponseMetadata": {
@@ -3200,801 +3233,6 @@
       }
     }
   },
-  "tests/aws/services/sns/test_sns.py::TestSNSFilter::test_filter_policy": {
-    "recorded-date": "25-01-2024, 18:07:57",
-    "recorded-content": {
-      "subscription-attributes": {
-        "Attributes": {
-          "ConfirmationWasAuthenticated": "true",
-          "Endpoint": "arn:aws:sqs:<region>:111111111111:<resource:1>",
-          "FilterPolicy": {
-            "attr1": [
-              {
-                "numeric": [
-                  ">",
-                  0,
-                  "<=",
-                  100
-                ]
-              }
-            ]
-          },
-          "FilterPolicyScope": "MessageAttributes",
-          "Owner": "111111111111",
-          "PendingConfirmation": "false",
-          "Protocol": "sqs",
-          "RawMessageDelivery": "false",
-          "SubscriptionArn": "arn:aws:sns:<region>:111111111111:<resource:4>:<resource:2>",
-          "SubscriptionPrincipal": "arn:aws:iam::111111111111:user/<resource:3>",
-          "TopicArn": "arn:aws:sns:<region>:111111111111:<resource:4>"
-        },
-        "ResponseMetadata": {
-          "HTTPHeaders": {},
-          "HTTPStatusCode": 200
-        }
-      },
-      "messages-0": {
-        "ResponseMetadata": {
-          "HTTPHeaders": {},
-          "HTTPStatusCode": 200
-        }
-      },
-      "messages-1": {
-        "Messages": [
-          {
-            "Body": {
-              "Type": "Notification",
-              "MessageId": "<uuid:1>",
-              "TopicArn": "arn:aws:sns:<region>:111111111111:<resource:4>",
-              "Message": "This is a test message",
-              "Timestamp": "date",
-              "SignatureVersion": "1",
-              "Signature": "<signature>",
-              "SigningCertURL": "<cert-domain>/SimpleNotificationService-<signing-cert-file:1>",
-              "UnsubscribeURL": "<unsubscribe-domain>/?Action=Unsubscribe&SubscriptionArn=arn:aws:sns:<region>:111111111111:<resource:4>:<resource:2>",
-              "MessageAttributes": {
-                "attr1": {
-                  "Type": "Number",
-                  "Value": "99"
-                }
-              }
-            },
-            "MD5OfBody": "<md5-hash>",
-            "MessageId": "<uuid:2>",
-            "ReceiptHandle": "<receipt-handle:1>"
-          }
-        ],
-        "ResponseMetadata": {
-          "HTTPHeaders": {},
-          "HTTPStatusCode": 200
-        }
-      },
-      "messages-2": {
-        "Messages": [
-          {
-            "Body": {
-              "Type": "Notification",
-              "MessageId": "<uuid:1>",
-              "TopicArn": "arn:aws:sns:<region>:111111111111:<resource:4>",
-              "Message": "This is a test message",
-              "Timestamp": "date",
-              "SignatureVersion": "1",
-              "Signature": "<signature>",
-              "SigningCertURL": "<cert-domain>/SimpleNotificationService-<signing-cert-file:1>",
-              "UnsubscribeURL": "<unsubscribe-domain>/?Action=Unsubscribe&SubscriptionArn=arn:aws:sns:<region>:111111111111:<resource:4>:<resource:2>",
-              "MessageAttributes": {
-                "attr1": {
-                  "Type": "Number",
-                  "Value": "99"
-                }
-              }
-            },
-            "MD5OfBody": "<md5-hash>",
-            "MessageId": "<uuid:2>",
-            "ReceiptHandle": "<receipt-handle:2>"
-          }
-        ],
-        "ResponseMetadata": {
-          "HTTPHeaders": {},
-          "HTTPStatusCode": 200
-        }
-      },
-      "subscription-attributes-2": {
-        "Attributes": {
-          "ConfirmationWasAuthenticated": "true",
-          "Endpoint": "arn:aws:sqs:<region>:111111111111:<resource:1>",
-          "FilterPolicy": {
-            "attr1": [
-              null,
-              {
-                "anything-but": "whatever"
-              }
-            ]
-          },
-          "FilterPolicyScope": "MessageAttributes",
-          "Owner": "111111111111",
-          "PendingConfirmation": "false",
-          "Protocol": "sqs",
-          "RawMessageDelivery": "false",
-          "SubscriptionArn": "arn:aws:sns:<region>:111111111111:<resource:4>:<resource:2>",
-          "SubscriptionPrincipal": "arn:aws:iam::111111111111:user/<resource:3>",
-          "TopicArn": "arn:aws:sns:<region>:111111111111:<resource:4>"
-        },
-        "ResponseMetadata": {
-          "HTTPHeaders": {},
-          "HTTPStatusCode": 200
-        }
-      },
-      "messages-3": {
-        "ResponseMetadata": {
-          "HTTPHeaders": {},
-          "HTTPStatusCode": 200
-        }
-      },
-      "messages-4": {
-        "Messages": [
-          {
-            "Body": {
-              "Type": "Notification",
-              "MessageId": "<uuid:3>",
-              "TopicArn": "arn:aws:sns:<region>:111111111111:<resource:4>",
-              "Message": "This the test message for null",
-              "Timestamp": "date",
-              "SignatureVersion": "1",
-              "Signature": "<signature>",
-              "SigningCertURL": "<cert-domain>/SimpleNotificationService-<signing-cert-file:1>",
-              "UnsubscribeURL": "<unsubscribe-domain>/?Action=Unsubscribe&SubscriptionArn=arn:aws:sns:<region>:111111111111:<resource:4>:<resource:2>"
-            },
-            "MD5OfBody": "<md5-hash>",
-            "MessageId": "<uuid:4>",
-            "ReceiptHandle": "<receipt-handle:3>"
-          }
-        ],
-        "ResponseMetadata": {
-          "HTTPHeaders": {},
-          "HTTPStatusCode": 200
-        }
-      }
-    }
-  },
-  "tests/aws/services/sns/test_sns.py::TestSNSFilter::test_exists_filter_policy": {
-    "recorded-date": "07-12-2023, 10:17:55",
-    "recorded-content": {
-      "subscription-attributes-policy-1": {
-        "Attributes": {
-          "ConfirmationWasAuthenticated": "true",
-          "Endpoint": "arn:aws:sqs:<region>:111111111111:<resource:1>",
-          "FilterPolicy": {
-            "store": [
-              {
-                "exists": true
-              }
-            ]
-          },
-          "FilterPolicyScope": "MessageAttributes",
-          "Owner": "111111111111",
-          "PendingConfirmation": "false",
-          "Protocol": "sqs",
-          "RawMessageDelivery": "false",
-          "SubscriptionArn": "arn:aws:sns:<region>:111111111111:<resource:4>:<resource:2>",
-          "SubscriptionPrincipal": "arn:aws:iam::111111111111:user/<resource:3>",
-          "TopicArn": "arn:aws:sns:<region>:111111111111:<resource:4>"
-        },
-        "ResponseMetadata": {
-          "HTTPHeaders": {},
-          "HTTPStatusCode": 200
-        }
-      },
-      "messages-0": {
-        "ResponseMetadata": {
-          "HTTPHeaders": {},
-          "HTTPStatusCode": 200
-        }
-      },
-      "messages-1": {
-        "Messages": [
-          {
-            "Body": {
-              "Type": "Notification",
-              "MessageId": "<uuid:1>",
-              "TopicArn": "arn:aws:sns:<region>:111111111111:<resource:4>",
-              "Message": "message-1",
-              "Timestamp": "date",
-              "SignatureVersion": "1",
-              "Signature": "<signature>",
-              "SigningCertURL": "<cert-domain>/SimpleNotificationService-<signing-cert-file:1>",
-              "UnsubscribeURL": "<unsubscribe-domain>/?Action=Unsubscribe&SubscriptionArn=arn:aws:sns:<region>:111111111111:<resource:4>:<resource:2>",
-              "MessageAttributes": {
-                "def": {
-                  "Type": "Number",
-                  "Value": "99"
-                },
-                "store": {
-                  "Type": "Number",
-                  "Value": "99"
-                }
-              }
-            },
-            "MD5OfBody": "<md5-hash>",
-            "MessageId": "<uuid:2>",
-            "ReceiptHandle": "<receipt-handle:1>"
-          }
-        ],
-        "ResponseMetadata": {
-          "HTTPHeaders": {},
-          "HTTPStatusCode": 200
-        }
-      },
-      "messages-2": {
-        "Messages": [
-          {
-            "Body": {
-              "Type": "Notification",
-              "MessageId": "<uuid:1>",
-              "TopicArn": "arn:aws:sns:<region>:111111111111:<resource:4>",
-              "Message": "message-1",
-              "Timestamp": "date",
-              "SignatureVersion": "1",
-              "Signature": "<signature>",
-              "SigningCertURL": "<cert-domain>/SimpleNotificationService-<signing-cert-file:1>",
-              "UnsubscribeURL": "<unsubscribe-domain>/?Action=Unsubscribe&SubscriptionArn=arn:aws:sns:<region>:111111111111:<resource:4>:<resource:2>",
-              "MessageAttributes": {
-                "def": {
-                  "Type": "Number",
-                  "Value": "99"
-                },
-                "store": {
-                  "Type": "Number",
-                  "Value": "99"
-                }
-              }
-            },
-            "MD5OfBody": "<md5-hash>",
-            "MessageId": "<uuid:2>",
-            "ReceiptHandle": "<receipt-handle:2>"
-          }
-        ],
-        "ResponseMetadata": {
-          "HTTPHeaders": {},
-          "HTTPStatusCode": 200
-        }
-      },
-      "subscription-attributes-policy-2": {
-        "Attributes": {
-          "ConfirmationWasAuthenticated": "true",
-          "Endpoint": "arn:aws:sqs:<region>:111111111111:<resource:1>",
-          "FilterPolicy": {
-            "store": [
-              {
-                "exists": false
-              }
-            ]
-          },
-          "FilterPolicyScope": "MessageAttributes",
-          "Owner": "111111111111",
-          "PendingConfirmation": "false",
-          "Protocol": "sqs",
-          "RawMessageDelivery": "false",
-          "SubscriptionArn": "arn:aws:sns:<region>:111111111111:<resource:4>:<resource:2>",
-          "SubscriptionPrincipal": "arn:aws:iam::111111111111:user/<resource:3>",
-          "TopicArn": "arn:aws:sns:<region>:111111111111:<resource:4>"
-        },
-        "ResponseMetadata": {
-          "HTTPHeaders": {},
-          "HTTPStatusCode": 200
-        }
-      },
-      "messages-3": {
-        "Messages": [
-          {
-            "Body": {
-              "Type": "Notification",
-              "MessageId": "<uuid:3>",
-              "TopicArn": "arn:aws:sns:<region>:111111111111:<resource:4>",
-              "Message": "message-3",
-              "Timestamp": "date",
-              "SignatureVersion": "1",
-              "Signature": "<signature>",
-              "SigningCertURL": "<cert-domain>/SimpleNotificationService-<signing-cert-file:1>",
-              "UnsubscribeURL": "<unsubscribe-domain>/?Action=Unsubscribe&SubscriptionArn=arn:aws:sns:<region>:111111111111:<resource:4>:<resource:2>",
-              "MessageAttributes": {
-                "def": {
-                  "Type": "Number",
-                  "Value": "99"
-                }
-              }
-            },
-            "MD5OfBody": "<md5-hash>",
-            "MessageId": "<uuid:4>",
-            "ReceiptHandle": "<receipt-handle:3>"
-          }
-        ],
-        "ResponseMetadata": {
-          "HTTPHeaders": {},
-          "HTTPStatusCode": 200
-        }
-      },
-      "messages-4": {
-        "Messages": [
-          {
-            "Body": {
-              "Type": "Notification",
-              "MessageId": "<uuid:3>",
-              "TopicArn": "arn:aws:sns:<region>:111111111111:<resource:4>",
-              "Message": "message-3",
-              "Timestamp": "date",
-              "SignatureVersion": "1",
-              "Signature": "<signature>",
-              "SigningCertURL": "<cert-domain>/SimpleNotificationService-<signing-cert-file:1>",
-              "UnsubscribeURL": "<unsubscribe-domain>/?Action=Unsubscribe&SubscriptionArn=arn:aws:sns:<region>:111111111111:<resource:4>:<resource:2>",
-              "MessageAttributes": {
-                "def": {
-                  "Type": "Number",
-                  "Value": "99"
-                }
-              }
-            },
-            "MD5OfBody": "<md5-hash>",
-            "MessageId": "<uuid:4>",
-            "ReceiptHandle": "<receipt-handle:4>"
-          }
-        ],
-        "ResponseMetadata": {
-          "HTTPHeaders": {},
-          "HTTPStatusCode": 200
-        }
-      }
-    }
-  },
-  "tests/aws/services/sns/test_sns.py::TestSNSFilter::test_set_subscription_filter_policy_scope": {
-    "recorded-date": "07-12-2023, 10:17:58",
-    "recorded-content": {
-      "sub-attrs-default": {
-        "Attributes": {
-          "ConfirmationWasAuthenticated": "true",
-          "Endpoint": "arn:aws:sqs:<region>:111111111111:<resource:1>",
-          "Owner": "111111111111",
-          "PendingConfirmation": "false",
-          "Protocol": "sqs",
-          "RawMessageDelivery": "false",
-          "SubscriptionArn": "arn:aws:sns:<region>:111111111111:<resource:4>:<resource:2>",
-          "SubscriptionPrincipal": "arn:aws:iam::111111111111:user/<resource:3>",
-          "TopicArn": "arn:aws:sns:<region>:111111111111:<resource:4>"
-        },
-        "ResponseMetadata": {
-          "HTTPHeaders": {},
-          "HTTPStatusCode": 200
-        }
-      },
-      "sub-attrs-filter-scope-body": {
-        "Attributes": {
-          "ConfirmationWasAuthenticated": "true",
-          "Endpoint": "arn:aws:sqs:<region>:111111111111:<resource:1>",
-          "Owner": "111111111111",
-          "PendingConfirmation": "false",
-          "Protocol": "sqs",
-          "RawMessageDelivery": "false",
-          "SubscriptionArn": "arn:aws:sns:<region>:111111111111:<resource:4>:<resource:2>",
-          "SubscriptionPrincipal": "arn:aws:iam::111111111111:user/<resource:3>",
-          "TopicArn": "arn:aws:sns:<region>:111111111111:<resource:4>"
-        },
-        "ResponseMetadata": {
-          "HTTPHeaders": {},
-          "HTTPStatusCode": 200
-        }
-      },
-      "sub-attrs-filter-scope-error": {
-        "Error": {
-          "Code": "InvalidParameter",
-          "Message": "Invalid parameter: FilterPolicyScope: Invalid value [RandomValue]. Please use either MessageBody or MessageAttributes",
-          "Type": "Sender"
-        },
-        "ResponseMetadata": {
-          "HTTPHeaders": {},
-          "HTTPStatusCode": 400
-        }
-      },
-      "sub-attrs-after-setting-policy": {
-        "Attributes": {
-          "ConfirmationWasAuthenticated": "true",
-          "Endpoint": "arn:aws:sqs:<region>:111111111111:<resource:1>",
-          "FilterPolicy": {
-            "attr": [
-              "match-this"
-            ]
-          },
-          "FilterPolicyScope": "MessageBody",
-          "Owner": "111111111111",
-          "PendingConfirmation": "false",
-          "Protocol": "sqs",
-          "RawMessageDelivery": "false",
-          "SubscriptionArn": "arn:aws:sns:<region>:111111111111:<resource:4>:<resource:2>",
-          "SubscriptionPrincipal": "arn:aws:iam::111111111111:user/<resource:3>",
-          "TopicArn": "arn:aws:sns:<region>:111111111111:<resource:4>"
-        },
-        "ResponseMetadata": {
-          "HTTPHeaders": {},
-          "HTTPStatusCode": 200
-        }
-      }
-    }
-  },
-  "tests/aws/services/sns/test_sns.py::TestSNSFilter::test_sub_filter_policy_nested_property": {
-    "recorded-date": "07-12-2023, 10:18:00",
-    "recorded-content": {
-      "sub-filter-policy-nested-error": {
-        "Error": {
-          "Code": "InvalidParameter",
-          "Message": "Invalid parameter: Filter policy scope MessageAttributes does not support nested filter policy",
-          "Type": "Sender"
-        },
-        "ResponseMetadata": {
-          "HTTPHeaders": {},
-          "HTTPStatusCode": 400
-        }
-      },
-      "sub-attrs-after-setting-nested-policy": {
-        "Attributes": {
-          "ConfirmationWasAuthenticated": "true",
-          "Endpoint": "arn:aws:sqs:<region>:111111111111:<resource:1>",
-          "FilterPolicy": {
-            "object": {
-              "key": [
-                {
-                  "prefix": "auto-"
-                }
-              ]
-            }
-          },
-          "FilterPolicyScope": "MessageBody",
-          "Owner": "111111111111",
-          "PendingConfirmation": "false",
-          "Protocol": "sqs",
-          "RawMessageDelivery": "false",
-          "SubscriptionArn": "arn:aws:sns:<region>:111111111111:<resource:4>:<resource:2>",
-          "SubscriptionPrincipal": "arn:aws:iam::111111111111:user/<resource:3>",
-          "TopicArn": "arn:aws:sns:<region>:111111111111:<resource:4>"
-        },
-        "ResponseMetadata": {
-          "HTTPHeaders": {},
-          "HTTPStatusCode": 200
-        }
-      }
-    }
-  },
-  "tests/aws/services/sns/test_sns.py::TestSNSFilter::test_sub_filter_policy_nested_property_constraints": {
-    "recorded-date": "07-12-2023, 10:18:03",
-    "recorded-content": {
-      "sub-filter-policy-nested-error-too-many-combinations": {
-        "Error": {
-          "Code": "InvalidParameter",
-          "Message": "Invalid parameter: FilterPolicy: Filter policy is too complex",
-          "Type": "Sender"
-        },
-        "ResponseMetadata": {
-          "HTTPHeaders": {},
-          "HTTPStatusCode": 400
-        }
-      },
-      "sub-filter-policy-max-attr-keys": {
-        "Error": {
-          "Code": "InvalidParameter",
-          "Message": "Invalid parameter: FilterPolicy: Filter policy can not have more than 5 keys",
-          "Type": "Sender"
-        },
-        "ResponseMetadata": {
-          "HTTPHeaders": {},
-          "HTTPStatusCode": 400
-        }
-      },
-      "sub-filter-policy-rule-no-list": {
-        "Error": {
-          "Code": "InvalidParameter",
-          "Message": "Invalid parameter: FilterPolicy: \"key_a\" must be an object or an array\n at [Source: (String)\"{\"key_a\":\"value_one\"}\"; line: 1, column: 11]",
-          "Type": "Sender"
-        },
-        "ResponseMetadata": {
-          "HTTPHeaders": {},
-          "HTTPStatusCode": 400
-        }
-      }
-    }
-  },
-  "tests/aws/services/sns/test_sns.py::TestSNSFilter::test_filter_policy_on_message_body[True]": {
-    "recorded-date": "07-12-2023, 10:18:17",
-    "recorded-content": {
-      "recv-init": {
-        "ResponseMetadata": {
-          "HTTPHeaders": {},
-          "HTTPStatusCode": 200
-        }
-      },
-      "recv-passed-msg-0": {
-        "Messages": [
-          {
-            "Body": {
-              "object": {
-                "key": "auto-test"
-              }
-            },
-            "MD5OfBody": "<md5-hash>",
-            "MessageId": "<uuid:1>",
-            "ReceiptHandle": "<receipt-handle:1>"
-          }
-        ],
-        "ResponseMetadata": {
-          "HTTPHeaders": {},
-          "HTTPStatusCode": 200
-        }
-      },
-      "recv-passed-msg-1": {
-        "Messages": [
-          {
-            "Body": {
-              "object": {
-                "key": "hardcodedvalue"
-              }
-            },
-            "MD5OfBody": "<md5-hash>",
-            "MessageId": "<uuid:2>",
-            "ReceiptHandle": "<receipt-handle:2>"
-          }
-        ],
-        "ResponseMetadata": {
-          "HTTPHeaders": {},
-          "HTTPStatusCode": 200
-        }
-      }
-    }
-  },
-  "tests/aws/services/sns/test_sns.py::TestSNSFilter::test_filter_policy_on_message_body[False]": {
-    "recorded-date": "07-12-2023, 10:18:31",
-    "recorded-content": {
-      "recv-init": {
-        "ResponseMetadata": {
-          "HTTPHeaders": {},
-          "HTTPStatusCode": 200
-        }
-      },
-      "recv-passed-msg-0": {
-        "Messages": [
-          {
-            "Body": {
-              "Type": "Notification",
-              "MessageId": "<uuid:1>",
-              "TopicArn": "arn:aws:sns:<region>:111111111111:<resource:1>",
-              "Message": "{\"object\": {\"key\": \"auto-test\"}}",
-              "Timestamp": "date",
-              "SignatureVersion": "1",
-              "Signature": "<signature>",
-              "SigningCertURL": "<cert-domain>/SimpleNotificationService-<signing-cert-file:1>",
-              "UnsubscribeURL": "<unsubscribe-domain>/?Action=Unsubscribe&SubscriptionArn=arn:aws:sns:<region>:111111111111:<resource:1>:<resource:2>"
-            },
-            "MD5OfBody": "<md5-hash>",
-            "MessageId": "<uuid:2>",
-            "ReceiptHandle": "<receipt-handle:1>"
-          }
-        ],
-        "ResponseMetadata": {
-          "HTTPHeaders": {},
-          "HTTPStatusCode": 200
-        }
-      },
-      "recv-passed-msg-1": {
-        "Messages": [
-          {
-            "Body": {
-              "Type": "Notification",
-              "MessageId": "<uuid:3>",
-              "TopicArn": "arn:aws:sns:<region>:111111111111:<resource:1>",
-              "Message": "{\"object\": {\"key\": \"hardcodedvalue\"}}",
-              "Timestamp": "date",
-              "SignatureVersion": "1",
-              "Signature": "<signature>",
-              "SigningCertURL": "<cert-domain>/SimpleNotificationService-<signing-cert-file:1>",
-              "UnsubscribeURL": "<unsubscribe-domain>/?Action=Unsubscribe&SubscriptionArn=arn:aws:sns:<region>:111111111111:<resource:1>:<resource:2>"
-            },
-            "MD5OfBody": "<md5-hash>",
-            "MessageId": "<uuid:4>",
-            "ReceiptHandle": "<receipt-handle:2>"
-          }
-        ],
-        "ResponseMetadata": {
-          "HTTPHeaders": {},
-          "HTTPStatusCode": 200
-        }
-      }
-    }
-  },
-  "tests/aws/services/sns/test_sns.py::TestSNSFilter::test_filter_policy_for_batch": {
-    "recorded-date": "07-12-2023, 10:18:50",
-    "recorded-content": {
-      "subscription-attributes-with-filter": {
-        "Attributes": {
-          "ConfirmationWasAuthenticated": "true",
-          "Endpoint": "arn:aws:sqs:<region>:111111111111:<resource:1>",
-          "FilterPolicy": {
-            "attr1": [
-              {
-                "numeric": [
-                  ">",
-                  0,
-                  "<=",
-                  100
-                ]
-              }
-            ]
-          },
-          "FilterPolicyScope": "MessageAttributes",
-          "Owner": "111111111111",
-          "PendingConfirmation": "false",
-          "Protocol": "sqs",
-          "RawMessageDelivery": "false",
-          "SubscriptionArn": "arn:aws:sns:<region>:111111111111:<resource:4>:<resource:2>",
-          "SubscriptionPrincipal": "arn:aws:iam::111111111111:user/<resource:3>",
-          "TopicArn": "arn:aws:sns:<region>:111111111111:<resource:4>"
-        },
-        "ResponseMetadata": {
-          "HTTPHeaders": {},
-          "HTTPStatusCode": 200
-        }
-      },
-      "subscription-attributes-no-filter": {
-        "Attributes": {
-          "ConfirmationWasAuthenticated": "true",
-          "Endpoint": "arn:aws:sqs:<region>:111111111111:<resource:5>",
-          "Owner": "111111111111",
-          "PendingConfirmation": "false",
-          "Protocol": "sqs",
-          "RawMessageDelivery": "false",
-          "SubscriptionArn": "arn:aws:sns:<region>:111111111111:<resource:4>:<resource:6>",
-          "SubscriptionPrincipal": "arn:aws:iam::111111111111:user/<resource:3>",
-          "TopicArn": "arn:aws:sns:<region>:111111111111:<resource:4>"
-        },
-        "ResponseMetadata": {
-          "HTTPHeaders": {},
-          "HTTPStatusCode": 200
-        }
-      },
-      "messages-no-filter-before-publish": {
-        "ResponseMetadata": {
-          "HTTPHeaders": {},
-          "HTTPStatusCode": 200
-        }
-      },
-      "messages-with-filter-before-publish": {
-        "ResponseMetadata": {
-          "HTTPHeaders": {},
-          "HTTPStatusCode": 200
-        }
-      },
-      "messages-no-filter-after-publish-ok": {
-        "Messages": [
-          {
-            "Body": {
-              "Type": "Notification",
-              "MessageId": "<uuid:1>",
-              "TopicArn": "arn:aws:sns:<region>:111111111111:<resource:4>",
-              "Message": "This is a test message",
-              "Timestamp": "date",
-              "SignatureVersion": "1",
-              "Signature": "<signature>",
-              "SigningCertURL": "<cert-domain>/SimpleNotificationService-<signing-cert-file:1>",
-              "UnsubscribeURL": "<unsubscribe-domain>/?Action=Unsubscribe&SubscriptionArn=arn:aws:sns:<region>:111111111111:<resource:4>:<resource:6>",
-              "MessageAttributes": {
-                "attr1": {
-                  "Type": "Number",
-                  "Value": "99"
-                }
-              }
-            },
-            "MD5OfBody": "<md5-hash>",
-            "MessageId": "<uuid:2>",
-            "ReceiptHandle": "<receipt-handle:1>"
-          }
-        ],
-        "ResponseMetadata": {
-          "HTTPHeaders": {},
-          "HTTPStatusCode": 200
-        }
-      },
-      "messages-with-filter-after-publish-ok": {
-        "Messages": [
-          {
-            "Body": {
-              "Type": "Notification",
-              "MessageId": "<uuid:1>",
-              "TopicArn": "arn:aws:sns:<region>:111111111111:<resource:4>",
-              "Message": "This is a test message",
-              "Timestamp": "date",
-              "SignatureVersion": "1",
-              "Signature": "<signature>",
-              "SigningCertURL": "<cert-domain>/SimpleNotificationService-<signing-cert-file:1>",
-              "UnsubscribeURL": "<unsubscribe-domain>/?Action=Unsubscribe&SubscriptionArn=arn:aws:sns:<region>:111111111111:<resource:4>:<resource:2>",
-              "MessageAttributes": {
-                "attr1": {
-                  "Type": "Number",
-                  "Value": "99"
-                }
-              }
-            },
-            "MD5OfBody": "<md5-hash>",
-            "MessageId": "<uuid:3>",
-            "ReceiptHandle": "<receipt-handle:2>"
-          }
-        ],
-        "ResponseMetadata": {
-          "HTTPHeaders": {},
-          "HTTPStatusCode": 200
-        }
-      },
-      "messages-no-filter-after-publish-ok-1": {
-        "Messages": [
-          {
-            "Body": {
-              "Type": "Notification",
-              "MessageId": "<uuid:4>",
-              "TopicArn": "arn:aws:sns:<region>:111111111111:<resource:4>",
-              "Message": "This is another test message",
-              "Timestamp": "date",
-              "SignatureVersion": "1",
-              "Signature": "<signature>",
-              "SigningCertURL": "<cert-domain>/SimpleNotificationService-<signing-cert-file:1>",
-              "UnsubscribeURL": "<unsubscribe-domain>/?Action=Unsubscribe&SubscriptionArn=arn:aws:sns:<region>:111111111111:<resource:4>:<resource:6>",
-              "MessageAttributes": {
-                "attr1": {
-                  "Type": "Number",
-                  "Value": "111"
-                }
-              }
-            },
-            "MD5OfBody": "<md5-hash>",
-            "MessageId": "<uuid:5>",
-            "ReceiptHandle": "<receipt-handle:3>"
-          }
-        ],
-        "ResponseMetadata": {
-          "HTTPHeaders": {},
-          "HTTPStatusCode": 200
-        }
-      },
-      "messages-with-filter-after-publish-filtered": {
-        "ResponseMetadata": {
-          "HTTPHeaders": {},
-          "HTTPStatusCode": 200
-        }
-      }
-    }
-  },
-  "tests/aws/services/sns/test_sns.py::TestSNSSMS::test_subscribe_sms_endpoint": {
-    "recorded-date": "25-08-2023, 00:20:07",
-    "recorded-content": {
-      "subscribe-sms-endpoint": {
-        "SubscriptionArn": "arn:aws:sns:<region>:111111111111:<resource:3>:<resource:1>",
-        "ResponseMetadata": {
-          "HTTPHeaders": {},
-          "HTTPStatusCode": 200
-        }
-      },
-      "subscribe-sms-attrs": {
-        "Attributes": {
-          "ConfirmationWasAuthenticated": "true",
-          "Endpoint": "+123123123",
-          "Owner": "111111111111",
-          "PendingConfirmation": "false",
-          "Protocol": "sms",
-          "RawMessageDelivery": "false",
-          "SubscriptionArn": "arn:aws:sns:<region>:111111111111:<resource:3>:<resource:1>",
-          "SubscriptionPrincipal": "arn:aws:iam::111111111111:user/<resource:2>",
-          "TopicArn": "arn:aws:sns:<region>:111111111111:<resource:3>"
-        },
-        "ResponseMetadata": {
-          "HTTPHeaders": {},
-          "HTTPStatusCode": 200
-        }
-      }
-    }
-  },
   "tests/aws/services/sns/test_sns.py::TestSNSSMS::test_publish_wrong_phone_format": {
     "recorded-date": "25-08-2023, 00:20:12",
     "recorded-content": {
@@ -4628,161 +3866,6 @@
       }
     }
   },
-  "tests/aws/services/sns/test_sns.py::TestSNSFilter::test_filter_policy_on_message_body_dot_attribute": {
-    "recorded-date": "07-12-2023, 10:19:19",
-    "recorded-content": {
-      "recv-init": {
-        "ResponseMetadata": {
-          "HTTPHeaders": {},
-          "HTTPStatusCode": 200
-        }
-      },
-      "recv-nested-msg-0": {
-        "Messages": [
-          {
-            "Body": {
-              "Type": "Notification",
-              "MessageId": "<uuid:1>",
-              "TopicArn": "arn:aws:sns:<region>:111111111111:<resource:1>",
-              "Message": "{\"object\": {\"nested\": \"string.value\"}}",
-              "Timestamp": "date",
-              "SignatureVersion": "1",
-              "Signature": "<signature>",
-              "SigningCertURL": "<cert-domain>/SimpleNotificationService-<signing-cert-file:1>",
-              "UnsubscribeURL": "<unsubscribe-domain>/?Action=Unsubscribe&SubscriptionArn=arn:aws:sns:<region>:111111111111:<resource:1>:<resource:2>"
-            },
-            "MD5OfBody": "<md5-hash>",
-            "MessageId": "<uuid:2>",
-            "ReceiptHandle": "<receipt-handle:1>"
-          }
-        ],
-        "ResponseMetadata": {
-          "HTTPHeaders": {},
-          "HTTPStatusCode": 200
-        }
-      },
-      "recv-nested-msg-1": {
-        "Messages": [
-          {
-            "Body": {
-              "Type": "Notification",
-              "MessageId": "<uuid:3>",
-              "TopicArn": "arn:aws:sns:<region>:111111111111:<resource:1>",
-              "Message": "{\"object.nested\": \"string.value\"}",
-              "Timestamp": "date",
-              "SignatureVersion": "1",
-              "Signature": "<signature>",
-              "SigningCertURL": "<cert-domain>/SimpleNotificationService-<signing-cert-file:1>",
-              "UnsubscribeURL": "<unsubscribe-domain>/?Action=Unsubscribe&SubscriptionArn=arn:aws:sns:<region>:111111111111:<resource:1>:<resource:2>"
-            },
-            "MD5OfBody": "<md5-hash>",
-            "MessageId": "<uuid:4>",
-            "ReceiptHandle": "<receipt-handle:2>"
-          }
-        ],
-        "ResponseMetadata": {
-          "HTTPHeaders": {},
-          "HTTPStatusCode": 200
-        }
-      },
-      "recv-deep-nested-msg-0": {
-        "Messages": [
-          {
-            "Body": {
-              "Type": "Notification",
-              "MessageId": "<uuid:5>",
-              "TopicArn": "arn:aws:sns:<region>:111111111111:<resource:1>",
-              "Message": "{\"object\": {\"nested\": {\"test\": \"string.value\"}}}",
-              "Timestamp": "date",
-              "SignatureVersion": "1",
-              "Signature": "<signature>",
-              "SigningCertURL": "<cert-domain>/SimpleNotificationService-<signing-cert-file:1>",
-              "UnsubscribeURL": "<unsubscribe-domain>/?Action=Unsubscribe&SubscriptionArn=arn:aws:sns:<region>:111111111111:<resource:1>:<resource:2>"
-            },
-            "MD5OfBody": "<md5-hash>",
-            "MessageId": "<uuid:6>",
-            "ReceiptHandle": "<receipt-handle:3>"
-          }
-        ],
-        "ResponseMetadata": {
-          "HTTPHeaders": {},
-          "HTTPStatusCode": 200
-        }
-      },
-      "recv-deep-nested-msg-1": {
-        "Messages": [
-          {
-            "Body": {
-              "Type": "Notification",
-              "MessageId": "<uuid:7>",
-              "TopicArn": "arn:aws:sns:<region>:111111111111:<resource:1>",
-              "Message": "{\"object.nested.test\": \"string.value\"}",
-              "Timestamp": "date",
-              "SignatureVersion": "1",
-              "Signature": "<signature>",
-              "SigningCertURL": "<cert-domain>/SimpleNotificationService-<signing-cert-file:1>",
-              "UnsubscribeURL": "<unsubscribe-domain>/?Action=Unsubscribe&SubscriptionArn=arn:aws:sns:<region>:111111111111:<resource:1>:<resource:2>"
-            },
-            "MD5OfBody": "<md5-hash>",
-            "MessageId": "<uuid:8>",
-            "ReceiptHandle": "<receipt-handle:4>"
-          }
-        ],
-        "ResponseMetadata": {
-          "HTTPHeaders": {},
-          "HTTPStatusCode": 200
-        }
-      },
-      "recv-deep-nested-msg-2": {
-        "Messages": [
-          {
-            "Body": {
-              "Type": "Notification",
-              "MessageId": "<uuid:9>",
-              "TopicArn": "arn:aws:sns:<region>:111111111111:<resource:1>",
-              "Message": "{\"object.nested\": {\"test\": \"string.value\"}}",
-              "Timestamp": "date",
-              "SignatureVersion": "1",
-              "Signature": "<signature>",
-              "SigningCertURL": "<cert-domain>/SimpleNotificationService-<signing-cert-file:1>",
-              "UnsubscribeURL": "<unsubscribe-domain>/?Action=Unsubscribe&SubscriptionArn=arn:aws:sns:<region>:111111111111:<resource:1>:<resource:2>"
-            },
-            "MD5OfBody": "<md5-hash>",
-            "MessageId": "<uuid:10>",
-            "ReceiptHandle": "<receipt-handle:5>"
-          }
-        ],
-        "ResponseMetadata": {
-          "HTTPHeaders": {},
-          "HTTPStatusCode": 200
-        }
-      },
-      "recv-deep-nested-msg-3": {
-        "Messages": [
-          {
-            "Body": {
-              "Type": "Notification",
-              "MessageId": "<uuid:11>",
-              "TopicArn": "arn:aws:sns:<region>:111111111111:<resource:1>",
-              "Message": "{\"object\": {\"nested.test\": \"string.value\"}}",
-              "Timestamp": "date",
-              "SignatureVersion": "1",
-              "Signature": "<signature>",
-              "SigningCertURL": "<cert-domain>/SimpleNotificationService-<signing-cert-file:1>",
-              "UnsubscribeURL": "<unsubscribe-domain>/?Action=Unsubscribe&SubscriptionArn=arn:aws:sns:<region>:111111111111:<resource:1>:<resource:2>"
-            },
-            "MD5OfBody": "<md5-hash>",
-            "MessageId": "<uuid:12>",
-            "ReceiptHandle": "<receipt-handle:6>"
-          }
-        ],
-        "ResponseMetadata": {
-          "HTTPHeaders": {},
-          "HTTPStatusCode": 200
-        }
-      }
-    }
-  },
   "tests/aws/services/sns/test_sns.py::TestSNSSubscriptionCrud::test_unsubscribe_wrong_arn_format": {
     "recorded-date": "20-10-2023, 12:52:36",
     "recorded-content": {
@@ -4987,6 +4070,77 @@
         "TopicArn": "arn:aws:sns:<region>:111111111111:<resource:1>",
         "Type": "Notification",
         "UnsubscribeUrl": "<unsubscribe-domain>/?Action=Unsubscribe&SubscriptionArn=arn:aws:sns:<region>:111111111111:<resource:1>:<resource:2>"
+      }
+    }
+  },
+  "tests/aws/services/sns/test_sns.py::TestSNSSubscriptionCrud::test_list_subscriptions_by_topic_pagination": {
+    "recorded-date": "16-05-2024, 10:32:16",
+    "recorded-content": {
+      "list-sub-per-topic-page-2": {
+        "Subscriptions": [
+          {
+            "Endpoint": "<endpoint:1>",
+            "Owner": "111111111111",
+            "Protocol": "sms",
+            "SubscriptionArn": "arn:aws:sns:<region>:111111111111:<resource:2>:<resource:1>",
+            "TopicArn": "arn:aws:sns:<region>:111111111111:<resource:2>"
+          }
+        ],
+        "ResponseMetadata": {
+          "HTTPHeaders": {},
+          "HTTPStatusCode": 200
+        }
+      }
+    }
+  },
+  "tests/aws/services/sns/test_sns.py::TestSNSSubscriptionHttp::test_http_subscription_response": {
+    "recorded-date": "13-05-2024, 21:28:15",
+    "recorded-content": {
+      "topic-arn": {
+        "TopicArn": "arn:aws:sns:<region>:111111111111:<resource:1>"
+      },
+      "subscription": {
+        "SubscriptionArn": "pending confirmation",
+        "ResponseMetadata": {
+          "HTTPHeaders": {},
+          "HTTPStatusCode": 200
+        }
+      },
+      "subscription-with-arn": {
+        "SubscriptionArn": "arn:aws:sns:<region>:111111111111:<resource:1>:<resource:2>",
+        "ResponseMetadata": {
+          "HTTPHeaders": {},
+          "HTTPStatusCode": 200
+        }
+      }
+    }
+  },
+  "tests/aws/services/sns/test_sns.py::TestSNSSMS::test_subscribe_sms_endpoint": {
+    "recorded-date": "14-05-2024, 19:34:12",
+    "recorded-content": {
+      "subscribe-sms-endpoint": {
+        "SubscriptionArn": "arn:aws:sns:<region>:111111111111:<resource:3>:<resource:1>",
+        "ResponseMetadata": {
+          "HTTPHeaders": {},
+          "HTTPStatusCode": 200
+        }
+      },
+      "subscribe-sms-attrs": {
+        "Attributes": {
+          "ConfirmationWasAuthenticated": "true",
+          "Endpoint": "+123123123",
+          "Owner": "111111111111",
+          "PendingConfirmation": "false",
+          "Protocol": "sms",
+          "RawMessageDelivery": "false",
+          "SubscriptionArn": "arn:aws:sns:<region>:111111111111:<resource:3>:<resource:1>",
+          "SubscriptionPrincipal": "arn:aws:iam::111111111111:user/<resource:2>",
+          "TopicArn": "arn:aws:sns:<region>:111111111111:<resource:3>"
+        },
+        "ResponseMetadata": {
+          "HTTPHeaders": {},
+          "HTTPStatusCode": 200
+        }
       }
     }
   }

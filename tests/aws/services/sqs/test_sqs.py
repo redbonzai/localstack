@@ -76,7 +76,7 @@ def sqs_snapshot_transformer(snapshot):
     snapshot.add_transformer(snapshot.transform.sqs_api())
 
 
-@pytest.fixture(params=["sqs", "sqs_json"])
+@pytest.fixture(params=["sqs", "sqs_query"])
 def aws_sqs_client(aws_client, request: str) -> "SQSClient":
     yield getattr(aws_client, request.param)
 
@@ -626,6 +626,29 @@ class TestSqsProvider:
                 Attributes={"FifoQueue": "true", "ContentBasedDeduplication": "false"},
             )
         snapshot.match("queue-already-exists", e.value.response)
+
+    @markers.aws.validated
+    def test_create_standard_queue_with_fifo_attribute_raises_error(
+        self, sqs_create_queue, aws_sqs_client, snapshot
+    ):
+        queue_name = f"queue-{short_uid()}"
+        with pytest.raises(ClientError) as e:
+            sqs_create_queue(QueueName=queue_name, Attributes={"FifoQueue": "false"})
+        snapshot.match("invalid-attribute-fifo-queue", e.value.response)
+
+        with pytest.raises(ClientError) as e:
+            sqs_create_queue(
+                QueueName=queue_name, Attributes={"ContentBasedDeduplication": "false"}
+            )
+        snapshot.match("invalid-attribute-content-based-deduplication", e.value.response)
+
+        with pytest.raises(ClientError) as e:
+            sqs_create_queue(QueueName=queue_name, Attributes={"DeduplicationScope": "queue"})
+        snapshot.match("invalid-attribute-deduplication-scope", e.value.response)
+
+        with pytest.raises(ClientError) as e:
+            sqs_create_queue(QueueName=queue_name, Attributes={"FifoThroughputLimit": "perQueue"})
+        snapshot.match("invalid-attribute-throughput-limit", e.value.response)
 
     @markers.aws.validated
     def test_send_message_with_delay_0_works_for_fifo(self, sqs_create_queue, aws_sqs_client):
@@ -1333,6 +1356,56 @@ class TestSqsProvider:
         content = to_str(result.content)
         kwargs = {"flags": re.MULTILINE | re.DOTALL}
         assert re.match(rf".*<QueueUrl>\s*{url}/[^<]+</QueueUrl>.*", content, **kwargs)
+
+    @pytest.mark.parametrize(
+        argnames="json_body",
+        argvalues=['{"foo": "ba\rr", "foo2": "ba&quot;r&quot;"}', json.dumps('{"foo": "ba\rr"}')],
+    )
+    @markers.aws.validated
+    def test_marker_serialization_json_protocol(
+        self, sqs_create_queue, aws_client, aws_http_client_factory, json_body
+    ):
+        queue_name = f"queue-{short_uid()}"
+        queue_url = sqs_create_queue(QueueName=queue_name)
+        message_body = json_body
+        aws_client.sqs.send_message(QueueUrl=queue_name, MessageBody=message_body)
+
+        client = aws_http_client_factory("sqs", region="us-east-1")
+
+        if is_aws_cloud():
+            endpoint_url = "https://queue.amazonaws.com"
+        else:
+            endpoint_url = config.internal_service_url()
+
+        response = client.get(
+            endpoint_url,
+            params={
+                "Action": "ReceiveMessage",
+                "QueueUrl": queue_url,
+                "Version": "2012-11-05",
+                "VisibilityTimeout": "0",
+            },
+            headers={"Accept": "application/json"},
+        )
+
+        parsed_content = json.loads(response.content.decode("utf-8"))
+
+        if is_aws_cloud():
+            assert (
+                parsed_content["ReceiveMessageResponse"]["ReceiveMessageResult"]["messages"][0][
+                    "Body"
+                ]
+                == message_body
+            )
+
+        # TODO: this is an error in LocalStack. Usually it should be messages[0]['Body']
+        else:
+            assert (
+                parsed_content["ReceiveMessageResponse"]["ReceiveMessageResult"]["Message"]["Body"]
+                == message_body
+            )
+        client_receive_response = aws_client.sqs.receive_message(QueueUrl=queue_url)
+        assert client_receive_response["Messages"][0]["Body"] == message_body
 
     @markers.aws.only_localstack
     def test_external_host_via_header_complete_message_lifecycle(
@@ -2984,10 +3057,25 @@ class TestSqsProvider:
         assert constructed_arn == get_single_attribute.get("Attributes").get("QueueArn")
         assert max_receive_count == redrive_policy.get("maxReceiveCount")
 
-    @pytest.mark.xfail
+    @markers.snapshot.skip_snapshot_verify(paths=["$..Error.Detail", "$..Error.Type"])
+    @markers.aws.validated
+    def test_set_unsupported_attribute_standard(self, sqs_create_queue, aws_sqs_client, snapshot):
+        queue_name = f"queue-{short_uid()}"
+        queue_url = sqs_create_queue(QueueName=queue_name)
+        with pytest.raises(ClientError) as e:
+            aws_sqs_client.set_queue_attributes(
+                QueueUrl=queue_url, Attributes={"FifoQueue": "true"}
+            )
+        snapshot.match("invalid-attr-name-1", e.value.response)
+        with pytest.raises(ClientError) as e:
+            aws_sqs_client.set_queue_attributes(
+                QueueUrl=queue_url, Attributes={"FifoQueue": "false"}
+            )
+        snapshot.match("invalid-attr-name-2", e.value.response)
+
+    @markers.snapshot.skip_snapshot_verify(paths=["$..Error.Detail", "$..Error.Type"])
     @markers.aws.validated
     def test_set_unsupported_attribute_fifo(self, sqs_create_queue, aws_sqs_client, snapshot):
-        # TODO: behaviour diverges from AWS
         queue_name = f"queue-{short_uid()}"
         queue_url = sqs_create_queue(QueueName=queue_name)
         with pytest.raises(ClientError) as e:
@@ -3999,13 +4087,6 @@ class TestSqsProvider:
         snapshot.match("error", e.value)
 
     @markers.aws.validated
-    @markers.snapshot.skip_snapshot_verify(
-        paths=[
-            "$.illegal_name_1.Messages[0].MessageAttributes",
-            "$.illegal_name_2.Messages[0].MessageAttributes",
-            # AWS does not return the field at all if there's an illegal name, we return empty dict
-        ]
-    )
     def test_receive_message_message_attribute_names_filters(
         self, sqs_create_queue, snapshot, aws_sqs_client
     ):
@@ -4266,20 +4347,20 @@ class TestSqsProvider:
     def test_non_existent_queue(self, aws_client, sqs_create_queue, sqs_queue_exists, snapshot):
         queue_name = f"test-queue-{short_uid()}"
         queue_url = sqs_create_queue(QueueName=queue_name)
-        aws_client.sqs_json.delete_queue(QueueUrl=queue_url)
+        aws_client.sqs.delete_queue(QueueUrl=queue_url)
         assert poll_condition(lambda: not sqs_queue_exists(queue_url), timeout=5)
 
         with pytest.raises(ClientError) as e:
-            aws_client.sqs_json.get_queue_attributes(QueueUrl=queue_url)
+            aws_client.sqs.get_queue_attributes(QueueUrl=queue_url)
         snapshot.match("queue-does-not-exist", e.value.response)
 
         # validate both the client exception handling in boto and GetQueueUrl
-        with pytest.raises(aws_client.sqs_json.exceptions.QueueDoesNotExist) as e:
-            aws_client.sqs_json.get_queue_url(QueueName=queue_name)
+        with pytest.raises(aws_client.sqs.exceptions.QueueDoesNotExist) as e:
+            aws_client.sqs.get_queue_url(QueueName=queue_name)
         snapshot.match("queue-does-not-exist-url", e.value.response)
 
         with pytest.raises(ClientError) as e:
-            aws_client.sqs.get_queue_attributes(QueueUrl=queue_url)
+            aws_client.sqs_query.get_queue_attributes(QueueUrl=queue_url)
         snapshot.match("queue-does-not-exist-query", e.value.response)
 
 
@@ -4624,8 +4705,8 @@ class TestSqsQueryApi:
             assert region2 in queue_region2
             # us-east-1 is the default region, so it's not necessarily part of the queue URL
 
-        client_region1 = aws_http_client_factory("sqs", region1)
-        client_region2 = aws_http_client_factory("sqs", region2)
+        client_region1 = aws_http_client_factory("sqs_query", region1)
+        client_region2 = aws_http_client_factory("sqs_query", region2)
 
         response = client_region1.get(
             queue_region1, params={"Action": "SendMessage", "MessageBody": "foobar"}
@@ -4746,7 +4827,7 @@ class TestSqsQueryApi:
         # protocol should target the root path
         sqs_client = aws_client_factory(
             endpoint_url=queue_url,
-        ).sqs_json
+        ).sqs
 
         response = sqs_client.receive_message(QueueUrl=queue_url, WaitTimeSeconds=1)
         assert (

@@ -1,4 +1,5 @@
 import json
+import logging
 from typing import Tuple
 
 import pytest
@@ -6,6 +7,80 @@ import pytest
 from localstack.utils.functions import call_safe
 from localstack.utils.strings import short_uid
 from localstack.utils.sync import retry
+
+LOG = logging.getLogger(__name__)
+
+
+@pytest.fixture
+def create_event_bus(aws_client):
+    event_bus_names = []
+
+    def _create_event_bus(**kwargs):
+        response = aws_client.events.create_event_bus(**kwargs)
+        event_bus_names.append(kwargs["Name"])
+        return response
+
+    yield _create_event_bus
+
+    for event_bus_name in event_bus_names:
+        try:
+            response = aws_client.events.list_rules(EventBusName=event_bus_name)
+            rules = [rule["Name"] for rule in response["Rules"]]
+
+            # Delete all rules for the current event bus
+            for rule in rules:
+                try:
+                    response = aws_client.events.list_targets_by_rule(
+                        Rule=rule, EventBusName=event_bus_name
+                    )
+                    targets = [target["Id"] for target in response["Targets"]]
+
+                    # Remove all targets for the current rule
+                    if targets:
+                        for target in targets:
+                            aws_client.events.remove_targets(
+                                Rule=rule, EventBusName=event_bus_name, Ids=[target]
+                            )
+
+                    aws_client.events.delete_rule(Name=rule, EventBusName=event_bus_name)
+                except Exception as e:
+                    LOG.warning(f"Failed to delete rule {rule}: {e}")
+
+            aws_client.events.delete_event_bus(Name=event_bus_name)
+        except Exception as e:
+            LOG.warning(f"Failed to delete event bus {event_bus_name}: {e}")
+
+
+@pytest.fixture
+def put_rule(aws_client):
+    rules = []
+
+    def _put_rule(**kwargs):
+        if "EventBusName" not in kwargs:
+            kwargs["EventBusName"] = "default"
+        response = aws_client.events.put_rule(**kwargs)
+        rules.append((kwargs["Name"], kwargs["EventBusName"]))
+        return response
+
+    yield _put_rule
+
+    for rule, event_bus_name in rules:
+        try:
+            response = aws_client.events.list_targets_by_rule(
+                Rule=rule, EventBusName=event_bus_name
+            )
+            targets = [target["Id"] for target in response["Targets"]]
+
+            # Remove all targets for the current rule
+            if targets:
+                for target in targets:
+                    aws_client.events.remove_targets(
+                        Rule=rule, EventBusName=event_bus_name, Ids=[target]
+                    )
+
+            aws_client.events.delete_rule(Name=rule, EventBusName=event_bus_name)
+        except Exception as e:
+            LOG.warning(f"Failed to delete rule {rule}: {e}")
 
 
 @pytest.fixture
@@ -50,15 +125,18 @@ def events_put_rule(aws_client):
     yield _factory
 
     for rule, event_bus_name in rules:
-        targets_response = aws_client.events.list_targets_by_rule(
-            Rule=rule, EventBusName=event_bus_name
-        )
-        if targets := targets_response["Targets"]:
-            targets_ids = [target["Id"] for target in targets]
-            aws_client.events.remove_targets(
-                Rule=rule, EventBusName=event_bus_name, Ids=targets_ids
+        try:
+            targets_response = aws_client.events.list_targets_by_rule(
+                Rule=rule, EventBusName=event_bus_name
             )
-        aws_client.events.delete_rule(Name=rule, EventBusName=event_bus_name)
+            if targets := targets_response["Targets"]:
+                targets_ids = [target["Id"] for target in targets]
+                aws_client.events.remove_targets(
+                    Rule=rule, EventBusName=event_bus_name, Ids=targets_ids
+                )
+            aws_client.events.delete_rule(Name=rule, EventBusName=event_bus_name)
+        except Exception as e:
+            LOG.debug("error cleaning up rule %s: %s", rule, e)
 
 
 @pytest.fixture
@@ -119,23 +197,12 @@ def clean_up(aws_client):
 
 
 @pytest.fixture
-def put_events_with_filter_to_sqs(aws_client, sqs_get_queue_arn, clean_up):
+def create_sqs_events_target(aws_client, sqs_get_queue_arn):
     queue_urls = []
-    event_bus_names = []
-    rule_names = []
-    target_ids = []
 
-    def _put_events_with_filter_to_sqs(
-        pattern: dict,
-        entries_asserts: list[Tuple[list[dict], bool]],
-        input_path: str = None,
-        input_transformer: dict[dict, str] = None,
-    ):
-        queue_name = f"queue-{short_uid()}"
-        rule_name = f"rule-{short_uid()}"
-        target_id = f"target-{short_uid()}"
-        bus_name = f"bus-{short_uid()}"
-
+    def _create_sqs_events_target(queue_name: str | None = None) -> tuple[str, str]:
+        if not queue_name:
+            queue_name = f"tests-queue-{short_uid()}"
         sqs_client = aws_client.sqs
         queue_url = sqs_client.create_queue(QueueName=queue_name)["QueueUrl"]
         queue_urls.append(queue_url)
@@ -156,6 +223,34 @@ def put_events_with_filter_to_sqs(aws_client, sqs_get_queue_arn, clean_up):
         sqs_client.set_queue_attributes(
             QueueUrl=queue_url, Attributes={"Policy": json.dumps(policy)}
         )
+        return queue_url, queue_arn
+
+    yield _create_sqs_events_target
+
+    for queue_url in queue_urls:
+        try:
+            aws_client.sqs.delete_queue(QueueUrl=queue_url)
+        except Exception as e:
+            LOG.debug("error cleaning up queue %s: %s", queue_url, e)
+
+
+@pytest.fixture
+def put_events_with_filter_to_sqs(aws_client, create_sqs_events_target, clean_up):
+    event_bus_names = []
+    rule_names = []
+    target_ids = []
+
+    def _put_events_with_filter_to_sqs(
+        pattern: dict,
+        entries_asserts: list[Tuple[list[dict], bool]],
+        input_path: str = None,
+        input_transformer: dict[dict, str] = None,
+    ):
+        rule_name = f"test-rule-{short_uid()}"
+        target_id = f"test-target-{short_uid()}"
+        bus_name = f"test-bus-{short_uid()}"
+
+        queue_url, queue_arn = create_sqs_events_target()
 
         events_client = aws_client.events
         events_client.create_event_bus(Name=bus_name)
@@ -187,7 +282,7 @@ def put_events_with_filter_to_sqs(aws_client, sqs_get_queue_arn, clean_up):
                 entry["EventBusName"] = bus_name
             message = _put_entries_assert_results_sqs(
                 events_client,
-                sqs_client,
+                aws_client.sqs,
                 queue_url,
                 entries=entries,
                 should_match=entry_asserts[1],
@@ -199,14 +294,11 @@ def put_events_with_filter_to_sqs(aws_client, sqs_get_queue_arn, clean_up):
 
     yield _put_events_with_filter_to_sqs
 
-    for queue_url, event_bus_name, rule_name, target_id in zip(
-        queue_urls, event_bus_names, rule_names, target_ids
-    ):
+    for event_bus_name, rule_name, target_id in zip(event_bus_names, rule_names, target_ids):
         clean_up(
             bus_name=event_bus_name,
             rule_name=rule_name,
             target_ids=target_id,
-            queue_url=queue_url,
         )
 
 
@@ -303,3 +395,59 @@ def sqs_collect_messages(
     retry(collect_events, retries=retries, sleep=0.01)
 
     return events
+
+
+@pytest.fixture
+def logs_create_log_group(aws_client):
+    log_group_names = []
+
+    def _create_log_group(name: str = None) -> str:
+        if not name:
+            name = f"test-log-group-{short_uid()}"
+
+        aws_client.logs.create_log_group(logGroupName=name)
+        log_group_names.append(name)
+
+        return name
+
+    yield _create_log_group
+
+    for name in log_group_names:
+        try:
+            aws_client.logs.delete_log_group(logGroupName=name)
+        except Exception as e:
+            LOG.debug("error cleaning up log group %s: %s", name, e)
+
+
+@pytest.fixture
+def add_resource_policy_logs_events_access(aws_client):
+    policies = []
+
+    def _add_resource_policy_logs_events_access(log_group_arn: str):
+        policy_name = f"test-policy-{short_uid()}"
+
+        policy_document = {
+            "Version": "2012-10-17",
+            "Statement": [
+                {
+                    "Sid": "AllowPutEvents",
+                    "Effect": "Allow",
+                    "Principal": {"Service": "events.amazonaws.com"},
+                    "Action": ["logs:PutLogEvents", "logs:CreateLogStream"],
+                    "Resource": log_group_arn,
+                },
+            ],
+        }
+        policy = aws_client.logs.put_resource_policy(
+            policyName=policy_name,
+            policyDocument=json.dumps(policy_document),
+        )
+
+        policies.append(policy_name)
+
+        return policy
+
+    yield _add_resource_policy_logs_events_access
+
+    for policy_name in policies:
+        aws_client.logs.delete_resource_policy(policyName=policy_name)

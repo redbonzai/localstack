@@ -658,7 +658,7 @@ def populate_edge_configuration(
 GATEWAY_WORKER_COUNT = int(os.environ.get("GATEWAY_WORKER_COUNT") or 1000)
 
 # the gateway server that should be used (supported: hypercorn, twisted dev: werkzeug)
-GATEWAY_SERVER = os.environ.get("GATEWAY_SERVER", "").strip() or "hypercorn"
+GATEWAY_SERVER = os.environ.get("GATEWAY_SERVER", "").strip() or "twisted"
 
 # IP of the docker bridge used to enable access between containers
 DOCKER_BRIDGE_IP = os.environ.get("DOCKER_BRIDGE_IP", "").strip()
@@ -761,6 +761,11 @@ if not DOCKER_BRIDGE_IP:
 # It should not be modified by the user, or visible to him, except as through a presigned url with the
 # get-function call.
 INTERNAL_RESOURCE_ACCOUNT = os.environ.get("INTERNAL_RESOURCE_ACCOUNT") or "949334387222"
+
+# Determine which implementation to use for the event rule / event filtering engine used by multiple services:
+# EventBridge, EventBridge Pipes, Lambda Event Source Mapping, SNS
+# Options: provider (default) | java
+EVENT_RULE_ENGINE = os.environ.get("EVENT_RULE_ENGINE", "").strip()
 
 # -----
 # SERVICE-SPECIFIC CONFIGS BELOW
@@ -1036,6 +1041,9 @@ PARITY_AWS_ACCESS_KEY_ID = is_env_true("PARITY_AWS_ACCESS_KEY_ID")
 # Show exceptions for CloudFormation deploy errors
 CFN_VERBOSE_ERRORS = is_env_true("CFN_VERBOSE_ERRORS")
 
+# Set the timeout to deploy each individual CloudFormation resource
+CFN_PER_RESOURCE_TIMEOUT = int(os.environ.get("CFN_PER_RESOURCE_TIMEOUT") or 300)
+
 # How localstack will react to encountering unsupported resource types.
 # By default unsupported resource types will be ignored.
 # EXPERIMENTAL
@@ -1129,6 +1137,7 @@ CONFIG_ENV_VARS = [
     "DYNAMODB_WRITE_ERROR_PROBABILITY",
     "EAGER_SERVICE_LOADING",
     "ENABLE_CONFIG_UPDATES",
+    "EVENT_RULE_ENGINE",
     "EXTRA_CORS_ALLOWED_HEADERS",
     "EXTRA_CORS_ALLOWED_ORIGINS",
     "EXTRA_CORS_EXPOSE_HEADERS",

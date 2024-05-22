@@ -11,12 +11,12 @@ pytest_plugins = [
     "localstack_snapshot.pytest.snapshot",
     "localstack.testing.pytest.filters",
     "localstack.testing.pytest.fixture_conflicts",
-    "localstack.testing.pytest.detect_thread_leakage",
     "localstack.testing.pytest.marking",
     "localstack.testing.pytest.marker_report",
     "localstack.testing.pytest.in_memory_localstack",
     "localstack.testing.pytest.validation_tracking",
     "localstack.testing.pytest.path_filter",
+    "localstack.testing.pytest.stepfunctions.fixtures",
 ]
 
 

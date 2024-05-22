@@ -4,12 +4,14 @@ import threading
 import pytest
 
 from localstack.testing.pytest import markers
+from localstack.testing.pytest.stepfunctions.utils import (
+    create_and_record_execution,
+)
 from localstack.utils.strings import short_uid
 from localstack.utils.sync import retry
 from tests.aws.services.stepfunctions.templates.services.services_templates import (
     ServicesTemplates as ST,
 )
-from tests.aws.services.stepfunctions.utils import create_and_record_execution
 from tests.aws.test_notifications import PUBLICATION_RETRIES, PUBLICATION_TIMEOUT
 
 
@@ -53,7 +55,7 @@ class TestTaskServiceSns:
         sns_create_topic,
         sfn_snapshot,
     ):
-        sfn_snapshot.add_transformer(sfn_snapshot.transform.sqs_api())
+        sfn_snapshot.add_transformer(sfn_snapshot.transform.sfn_sqs_integration())
         fifo_topic_name = f"topic-{short_uid()}.fifo"
         sns_topic = sns_create_topic(Name=fifo_topic_name, Attributes={"FifoTopic": "true"})
         topic_arn = sns_topic["TopicArn"]
@@ -88,7 +90,7 @@ class TestTaskServiceSns:
         sfn_snapshot,
         message,
     ):
-        sfn_snapshot.add_transformer(sfn_snapshot.transform.sqs_api())
+        sfn_snapshot.add_transformer(sfn_snapshot.transform.sfn_sqs_integration())
 
         sns_topic = sns_create_topic()
         topic_arn = sns_topic["TopicArn"]
@@ -123,7 +125,7 @@ class TestTaskServiceSns:
         message_value,
     ):
         sfn_snapshot.add_transformer(sfn_snapshot.transform.sns_api())
-        sfn_snapshot.add_transformer(sfn_snapshot.transform.sqs_api())
+        sfn_snapshot.add_transformer(sfn_snapshot.transform.sfn_sqs_integration())
 
         topic_info = sns_create_topic()
         topic_arn = topic_info["TopicArn"]
@@ -181,7 +183,7 @@ class TestTaskServiceSns:
         sns_create_topic,
         sfn_snapshot,
     ):
-        sfn_snapshot.add_transformer(sfn_snapshot.transform.sqs_api())
+        sfn_snapshot.add_transformer(sfn_snapshot.transform.sfn_sqs_integration())
 
         sns_topic = sns_create_topic()
         topic_arn = sns_topic["TopicArn"]

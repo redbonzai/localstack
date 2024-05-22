@@ -7,8 +7,13 @@ from localstack_snapshot.snapshots.transformer import JsonpathTransformer, Regex
 from localstack.aws.api.lambda_ import Runtime
 from localstack.services.stepfunctions.asl.utils.json_path import JSONPathUtils
 from localstack.testing.pytest import markers
+from localstack.testing.pytest.stepfunctions.utils import (
+    SfnNoneRecursiveParallelTransformer,
+    await_execution_terminated,
+    create,
+    create_and_record_execution,
+)
 from localstack.utils.strings import short_uid
-from tests.aws.services.stepfunctions.conftest import SfnNoneRecursiveParallelTransformer
 from tests.aws.services.stepfunctions.templates.errorhandling.error_handling_templates import (
     ErrorHandlingTemplate as EHT,
 )
@@ -17,11 +22,6 @@ from tests.aws.services.stepfunctions.templates.scenarios.scenarios_templates im
 )
 from tests.aws.services.stepfunctions.templates.services.services_templates import (
     ServicesTemplates as SerT,
-)
-from tests.aws.services.stepfunctions.utils import (
-    await_execution_terminated,
-    create,
-    create_and_record_execution,
 )
 
 
@@ -115,6 +115,63 @@ class TestBaseScenarios:
         )
 
     @markers.aws.validated
+    @pytest.mark.parametrize("max_concurrency_value", [dict(), "NoNumber", 0, 1])
+    def test_max_concurrency_path(
+        self,
+        aws_client,
+        create_iam_role_for_sfn,
+        create_state_machine,
+        sfn_snapshot,
+        max_concurrency_value,
+    ):
+        # TODO: Investigate AWS's behaviour with stringified integer values such as "1", as when passed as
+        #  execution inputs these are casted to integers. Future efforts should record more snapshot tests to assert
+        #  the behaviour of such stringification on execution inputs
+        template = ST.load_sfn_template(ST.MAX_CONCURRENCY)
+        definition = json.dumps(template)
+
+        exec_input = json.dumps(
+            {"MaxConcurrencyValue": max_concurrency_value, "Values": ["HelloWorld"]}
+        )
+        create_and_record_execution(
+            aws_client.stepfunctions,
+            create_iam_role_for_sfn,
+            create_state_machine,
+            sfn_snapshot,
+            definition,
+            exec_input,
+        )
+
+    @markers.aws.validated
+    @markers.snapshot.skip_snapshot_verify(
+        paths=[
+            # TODO: AWS consistently appears to stall after startup when a negative MaxConcurrency value is given.
+            #  Instead, the Provider V2 raises a State.Runtime exception and terminates. In the future we should
+            #  reevaluate AWS's behaviour in these circumstances and choose whether too also 'hang'.
+            "$..events"
+        ]
+    )
+    def test_max_concurrency_path_negative(
+        self,
+        aws_client,
+        create_iam_role_for_sfn,
+        create_state_machine,
+        sfn_snapshot,
+    ):
+        template = ST.load_sfn_template(ST.MAX_CONCURRENCY)
+        definition = json.dumps(template)
+
+        exec_input = json.dumps({"MaxConcurrencyValue": -1, "Values": ["HelloWorld"]})
+        create_and_record_execution(
+            aws_client.stepfunctions,
+            create_iam_role_for_sfn,
+            create_state_machine,
+            sfn_snapshot,
+            definition,
+            exec_input,
+        )
+
+    @markers.aws.validated
     def test_parallel_state_order(
         self,
         aws_client,
@@ -148,6 +205,37 @@ class TestBaseScenarios:
         definition = json.dumps(template)
 
         exec_input = json.dumps({})
+        create_and_record_execution(
+            aws_client.stepfunctions,
+            create_iam_role_for_sfn,
+            create_state_machine,
+            sfn_snapshot,
+            definition,
+            exec_input,
+        )
+
+    @markers.aws.validated
+    @markers.snapshot.skip_snapshot_verify(
+        paths=[
+            # TODO: AWS appears to have changed json encoding to include spaces after separators,
+            #  other v2 test suite snapshots need to be re-recorded
+            "$..events..stateEnteredEventDetails.input",
+            "$..events..stateExitedEventDetails.output",
+            "$..events..executionSucceededEventDetails.output",
+        ]
+    )
+    def test_parallel_state_nested(
+        self,
+        aws_client,
+        create_iam_role_for_sfn,
+        create_state_machine,
+        sfn_snapshot,
+    ):
+        sfn_snapshot.add_transformer(SfnNoneRecursiveParallelTransformer())
+        template = ST.load_sfn_template(ST.PARALLEL_NESTED_NESTED)
+        definition = json.dumps(template)
+
+        exec_input = json.dumps([[1, 2, 3], [4, 5, 6]])
         create_and_record_execution(
             aws_client.stepfunctions,
             create_iam_role_for_sfn,
@@ -211,6 +299,39 @@ class TestBaseScenarios:
         definition = json.dumps(template)
 
         exec_input = json.dumps({})
+        create_and_record_execution(
+            aws_client.stepfunctions,
+            create_iam_role_for_sfn,
+            create_state_machine,
+            sfn_snapshot,
+            definition,
+            exec_input,
+        )
+
+    @markers.aws.validated
+    @markers.snapshot.skip_snapshot_verify(
+        paths=[
+            # TODO: AWS appears to have changed json encoding to include spaces after separators,
+            #  other v2 test suite snapshots need to be re-recorded
+            "$..events..stateEnteredEventDetails.input"
+        ]
+    )
+    def test_map_state_nested(
+        self,
+        aws_client,
+        create_iam_role_for_sfn,
+        create_state_machine,
+        sfn_snapshot,
+    ):
+        template = ST.load_sfn_template(ST.MAP_STATE_NESTED)
+        definition = json.dumps(template)
+
+        exec_input = json.dumps(
+            [
+                [1, 2, 3],
+                [4, 5, 6],
+            ]
+        )
         create_and_record_execution(
             aws_client.stepfunctions,
             create_iam_role_for_sfn,
@@ -449,6 +570,94 @@ class TestBaseScenarios:
         definition = json.dumps(template)
 
         exec_input = json.dumps(["Hello", "World"])
+        create_and_record_execution(
+            aws_client.stepfunctions,
+            create_iam_role_for_sfn,
+            create_state_machine,
+            sfn_snapshot,
+            definition,
+            exec_input,
+        )
+
+    @markers.aws.validated
+    def test_map_state_legacy_reentrant(
+        self,
+        aws_client,
+        create_iam_role_for_sfn,
+        create_state_machine,
+        sfn_snapshot,
+    ):
+        template = ST.load_sfn_template(ST.MAP_STATE_LEGACY_REENTRANT)
+        definition = json.dumps(template)
+
+        exec_input = json.dumps({})
+        create_and_record_execution(
+            aws_client.stepfunctions,
+            create_iam_role_for_sfn,
+            create_state_machine,
+            sfn_snapshot,
+            definition,
+            exec_input,
+        )
+
+    @markers.aws.validated
+    def test_map_state_config_distributed_reentrant(
+        self,
+        aws_client,
+        create_iam_role_for_sfn,
+        create_state_machine,
+        sfn_snapshot,
+    ):
+        # Replace MapRunArns with fixed values to circumvent random ordering issues.
+        sfn_snapshot.add_transformer(
+            JsonpathTransformer(
+                jsonpath="$..mapRunArn", replacement="map_run_arn", replace_reference=False
+            )
+        )
+
+        template = ST.load_sfn_template(ST.MAP_STATE_CONFIG_DISTRIBUTED_REENTRANT)
+        definition = json.dumps(template)
+
+        exec_input = json.dumps({})
+        create_and_record_execution(
+            aws_client.stepfunctions,
+            create_iam_role_for_sfn,
+            create_state_machine,
+            sfn_snapshot,
+            definition,
+            exec_input,
+        )
+
+    @markers.aws.validated
+    def test_map_state_config_distributed_reentrant_lambda(
+        self,
+        aws_client,
+        create_iam_role_for_sfn,
+        create_state_machine,
+        create_lambda_function,
+        sfn_snapshot,
+    ):
+        # Replace MapRunArns with fixed values to circumvent random ordering issues.
+        sfn_snapshot.add_transformer(
+            JsonpathTransformer(
+                jsonpath="$..mapRunArn", replacement="map_run_arn", replace_reference=False
+            )
+        )
+
+        function_name = f"sfn_lambda_{short_uid()}"
+        create_res = create_lambda_function(
+            func_name=function_name,
+            handler_file=SerT.LAMBDA_ID_FUNCTION,
+            runtime=Runtime.python3_12,
+        )
+        sfn_snapshot.add_transformer(RegexTransformer(function_name, "lambda_function_name"))
+        function_arn = create_res["CreateFunctionResponse"]["FunctionArn"]
+
+        template = ST.load_sfn_template(ST.MAP_STATE_CONFIG_DISTRIBUTED_REENTRANT_LAMBDA)
+        definition = json.dumps(template)
+        definition = definition.replace("_tbd_", function_arn)
+
+        exec_input = json.dumps({})
         create_and_record_execution(
             aws_client.stepfunctions,
             create_iam_role_for_sfn,

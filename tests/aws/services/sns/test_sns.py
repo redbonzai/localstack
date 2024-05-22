@@ -580,12 +580,26 @@ class TestSNSSubscriptionCrud:
         queue_url = sqs_create_queue()
         queue_arn = sqs_get_queue_arn(queue_url)
 
+        with pytest.raises(ClientError) as e:
+            sns_subscription(
+                TopicArn=topic_arn,
+                Protocol="sqs",
+                Endpoint=queue_arn,
+                Attributes={
+                    "RawMessageDelivery": "wrongvalue",  # set an weird case value, SNS will lower it
+                    "FilterPolicyScope": "MessageBody",
+                    "FilterPolicy": "",
+                },
+                ReturnSubscriptionArn=True,
+            )
+        snapshot.match("subscribe-wrong-attr", e.value.response)
+
         subscribe_resp = sns_subscription(
             TopicArn=topic_arn,
             Protocol="sqs",
             Endpoint=queue_arn,
             Attributes={
-                "RawMessageDelivery": "true",
+                "RawMessageDelivery": "TrUe",  # set an weird case value, SNS will lower it
                 "FilterPolicyScope": "MessageBody",
                 "FilterPolicy": "",
             },
@@ -681,6 +695,22 @@ class TestSNSSubscriptionCrud:
                 AttributeValue="test-value",
             )
         snapshot.match("fake-attribute", e.value.response)
+
+        with pytest.raises(ClientError) as e:
+            aws_client.sns.set_subscription_attributes(
+                SubscriptionArn=sub_arn,
+                AttributeName="RawMessageDelivery",
+                AttributeValue="test-ValUe",
+            )
+        snapshot.match("raw-message-wrong-value", e.value.response)
+
+        with pytest.raises(ClientError) as e:
+            aws_client.sns.set_subscription_attributes(
+                SubscriptionArn=sub_arn,
+                AttributeName="RawMessageDelivery",
+                AttributeValue="",
+            )
+        snapshot.match("raw-message-empty-value", e.value.response)
 
         with pytest.raises(ClientError) as e:
             aws_client.sns.set_subscription_attributes(
@@ -790,6 +820,47 @@ class TestSNSSubscriptionCrud:
         snapshot.match("list-subscriptions-aggregated", list_subs)
 
         assert all((sub["TopicArn"], sub["Endpoint"]) in sorting_list for sub in all_subs)
+
+    @markers.aws.validated
+    def test_list_subscriptions_by_topic_pagination(
+        self, sns_create_topic, sns_subscription, snapshot, aws_client
+    ):
+        # ordering of the listing seems to be not consistent, so we can transform its value
+        snapshot.add_transformers_list(
+            [
+                snapshot.transform.key_value("Endpoint"),
+                snapshot.transform.key_value("NextToken"),
+            ]
+        )
+
+        base_phone_number = "+12312312"
+        topic_arn = sns_create_topic()["TopicArn"]
+        for phone_suffix in range(101):
+            phone_number = f"{base_phone_number}{phone_suffix}"
+            sns_subscription(TopicArn=topic_arn, Protocol="sms", Endpoint=phone_number)
+
+        response = aws_client.sns.list_subscriptions_by_topic(TopicArn=topic_arn)
+        # not snapshotting the results, it contains 100 entries
+        assert "NextToken" in response
+        # seems to be b64 encoded
+        assert base64.b64decode(response["NextToken"])
+        assert len(response["Subscriptions"]) == 100
+        # keep the page 1 subscriptions ARNs
+        page_1_subs = {sub["SubscriptionArn"] for sub in response["Subscriptions"]}
+
+        response = aws_client.sns.list_subscriptions_by_topic(
+            TopicArn=topic_arn, NextToken=response["NextToken"]
+        )
+        snapshot.match("list-sub-per-topic-page-2", response)
+        assert "NextToken" not in response
+        assert len(response["Subscriptions"]) == 1
+        # assert that the last Subscription is not present in page 1
+        assert response["Subscriptions"][0]["SubscriptionArn"] not in page_1_subs
+
+        response = aws_client.sns.list_subscriptions()
+        # not snapshotting because there might be subscriptions outside the topic, this is all the requester subs
+        assert "NextToken" in response
+        assert len(response["Subscriptions"]) <= 100
 
     @markers.aws.validated
     def test_subscribe_idempotency(
@@ -2093,7 +2164,7 @@ class TestSNSSubscriptionSQSFifo:
 
         aws_client.sns.publish(TopicArn=topic_arn, Message=message, **kwargs)
 
-        response = aws_client.sqs_json.receive_message(
+        response = aws_client.sqs.receive_message(
             QueueUrl=queue_url,
             WaitTimeSeconds=10,
             AttributeNames=["All"],
@@ -2105,7 +2176,7 @@ class TestSNSSubscriptionSQSFifo:
         )
         # republish the message, to check deduplication
         aws_client.sns.publish(TopicArn=topic_arn, Message=message, **kwargs)
-        response = aws_client.sqs_json.receive_message(
+        response = aws_client.sqs.receive_message(
             QueueUrl=queue_url,
             WaitTimeSeconds=1,
             AttributeNames=["All"],
@@ -2770,742 +2841,6 @@ class TestSNSSubscriptionSES:
         retry(check_subscription, retries=PUBLICATION_RETRIES, sleep=PUBLICATION_TIMEOUT)
 
 
-class TestSNSFilter:
-    @markers.aws.validated
-    def test_filter_policy(
-        self, sqs_create_queue, sns_create_topic, sns_create_sqs_subscription, snapshot, aws_client
-    ):
-        topic_arn = sns_create_topic()["TopicArn"]
-        queue_url = sqs_create_queue()
-        subscription = sns_create_sqs_subscription(topic_arn=topic_arn, queue_url=queue_url)
-        subscription_arn = subscription["SubscriptionArn"]
-
-        filter_policy = {"attr1": [{"numeric": [">", 0, "<=", 100]}]}
-        aws_client.sns.set_subscription_attributes(
-            SubscriptionArn=subscription_arn,
-            AttributeName="FilterPolicy",
-            AttributeValue=json.dumps(filter_policy),
-        )
-
-        response_attributes = aws_client.sns.get_subscription_attributes(
-            SubscriptionArn=subscription_arn
-        )
-        snapshot.match("subscription-attributes", response_attributes)
-
-        response_0 = aws_client.sqs.receive_message(
-            QueueUrl=queue_url, VisibilityTimeout=0, WaitTimeSeconds=1
-        )
-        snapshot.match("messages-0", response_0)
-        # get number of messages
-        num_msgs_0 = len(response_0.get("Messages", []))
-
-        # publish message that satisfies the filter policy, assert that message is received
-        message = "This is a test message"
-        message_attributes = {"attr1": {"DataType": "Number", "StringValue": "99"}}
-        aws_client.sns.publish(
-            TopicArn=topic_arn,
-            Message=message,
-            MessageAttributes=message_attributes,
-        )
-
-        response_1 = aws_client.sqs.receive_message(
-            QueueUrl=queue_url, VisibilityTimeout=0, WaitTimeSeconds=4
-        )
-        snapshot.match("messages-1", response_1)
-
-        num_msgs_1 = len(response_1["Messages"])
-        assert num_msgs_1 == (num_msgs_0 + 1)
-
-        # publish message that does not satisfy the filter policy, assert that message is not received
-        message = "This is another test message"
-        aws_client.sns.publish(
-            TopicArn=topic_arn,
-            Message=message,
-            MessageAttributes={"attr1": {"DataType": "Number", "StringValue": "111"}},
-        )
-
-        response_2 = aws_client.sqs.receive_message(
-            QueueUrl=queue_url, VisibilityTimeout=0, WaitTimeSeconds=4
-        )
-        snapshot.match("messages-2", response_2)
-        num_msgs_2 = len(response_2["Messages"])
-        assert num_msgs_2 == num_msgs_1
-
-        # remove all messages from the queue
-        receipt_handle = response_1["Messages"][0]["ReceiptHandle"]
-        aws_client.sqs.delete_message(QueueUrl=queue_url, ReceiptHandle=receipt_handle)
-
-        # test with a property value set to null with an OR operator with anything-but
-        filter_policy = json.dumps({"attr1": [None, {"anything-but": "whatever"}]})
-        aws_client.sns.set_subscription_attributes(
-            SubscriptionArn=subscription_arn,
-            AttributeName="FilterPolicy",
-            AttributeValue=filter_policy,
-        )
-
-        def get_filter_policy():
-            subscription_attrs = aws_client.sns.get_subscription_attributes(
-                SubscriptionArn=subscription_arn
-            )
-            return subscription_attrs["Attributes"]["FilterPolicy"]
-
-        # wait for the new filter policy to be in effect
-        poll_condition(lambda: get_filter_policy() == filter_policy, timeout=4)
-        response_attributes_2 = aws_client.sns.get_subscription_attributes(
-            SubscriptionArn=subscription_arn
-        )
-        snapshot.match("subscription-attributes-2", response_attributes_2)
-
-        # publish message that does not satisfy the filter policy, assert that message is not received
-        message = "This the test message for null"
-        aws_client.sns.publish(
-            TopicArn=topic_arn,
-            Message=message,
-        )
-
-        response_3 = aws_client.sqs.receive_message(
-            QueueUrl=queue_url, VisibilityTimeout=0, WaitTimeSeconds=4
-        )
-        snapshot.match("messages-3", response_3)
-        assert "Messages" not in response_3 or response_3["Messages"] == []
-
-        # unset the filter policy
-        aws_client.sns.set_subscription_attributes(
-            SubscriptionArn=subscription_arn,
-            AttributeName="FilterPolicy",
-            AttributeValue="",
-        )
-
-        def check_no_filter_policy():
-            subscription_attrs = aws_client.sns.get_subscription_attributes(
-                SubscriptionArn=subscription_arn
-            )
-            return "FilterPolicy" not in subscription_attrs["Attributes"]
-
-        poll_condition(check_no_filter_policy, timeout=4)
-
-        # publish message that does not satisfy the previous filter policy, but assert that the message is received now
-        message = "This the test message for null"
-        aws_client.sns.publish(
-            TopicArn=topic_arn,
-            Message=message,
-        )
-
-        response_4 = aws_client.sqs.receive_message(
-            QueueUrl=queue_url, VisibilityTimeout=0, WaitTimeSeconds=4
-        )
-        snapshot.match("messages-4", response_4)
-
-    @markers.aws.validated
-    def test_exists_filter_policy(
-        self, sqs_create_queue, sns_create_topic, sns_create_sqs_subscription, snapshot, aws_client
-    ):
-        topic_arn = sns_create_topic()["TopicArn"]
-        queue_url = sqs_create_queue()
-        subscription = sns_create_sqs_subscription(topic_arn=topic_arn, queue_url=queue_url)
-        subscription_arn = subscription["SubscriptionArn"]
-
-        filter_policy = {"store": [{"exists": True}]}
-        aws_client.sns.set_subscription_attributes(
-            SubscriptionArn=subscription_arn,
-            AttributeName="FilterPolicy",
-            AttributeValue=json.dumps(filter_policy),
-        )
-
-        response_attributes = aws_client.sns.get_subscription_attributes(
-            SubscriptionArn=subscription_arn
-        )
-        snapshot.match("subscription-attributes-policy-1", response_attributes)
-
-        response_0 = aws_client.sqs.receive_message(QueueUrl=queue_url, VisibilityTimeout=0)
-        snapshot.match("messages-0", response_0)
-        # get number of messages
-        num_msgs_0 = len(response_0.get("Messages", []))
-
-        # publish message that satisfies the filter policy, assert that message is received
-        message_1 = "message-1"
-        aws_client.sns.publish(
-            TopicArn=topic_arn,
-            Message=message_1,
-            MessageAttributes={
-                "store": {"DataType": "Number", "StringValue": "99"},
-                "def": {"DataType": "Number", "StringValue": "99"},
-            },
-        )
-        response_1 = aws_client.sqs.receive_message(
-            QueueUrl=queue_url, VisibilityTimeout=0, WaitTimeSeconds=4
-        )
-        snapshot.match("messages-1", response_1)
-        num_msgs_1 = len(response_1["Messages"])
-        assert num_msgs_1 == (num_msgs_0 + 1)
-
-        # publish message that does not satisfy the filter policy, assert that message is not received
-        message_2 = "message-2"
-        aws_client.sns.publish(
-            TopicArn=topic_arn,
-            Message=message_2,
-            MessageAttributes={"attr1": {"DataType": "Number", "StringValue": "111"}},
-        )
-
-        response_2 = aws_client.sqs.receive_message(
-            QueueUrl=queue_url, VisibilityTimeout=0, WaitTimeSeconds=4
-        )
-        snapshot.match("messages-2", response_2)
-        num_msgs_2 = len(response_2["Messages"])
-        assert num_msgs_2 == num_msgs_1
-
-        # delete first message
-        aws_client.sqs.delete_message(
-            QueueUrl=queue_url, ReceiptHandle=response_1["Messages"][0]["ReceiptHandle"]
-        )
-
-        # test with exist operator set to false.
-        filter_policy = json.dumps({"store": [{"exists": False}]})
-        aws_client.sns.set_subscription_attributes(
-            SubscriptionArn=subscription_arn,
-            AttributeName="FilterPolicy",
-            AttributeValue=filter_policy,
-        )
-
-        def get_filter_policy():
-            subscription_attrs = aws_client.sns.get_subscription_attributes(
-                SubscriptionArn=subscription_arn
-            )
-            return subscription_attrs["Attributes"]["FilterPolicy"]
-
-        # wait for the new filter policy to be in effect
-        poll_condition(lambda: get_filter_policy() == filter_policy, timeout=4)
-        response_attributes_2 = aws_client.sns.get_subscription_attributes(
-            SubscriptionArn=subscription_arn
-        )
-        snapshot.match("subscription-attributes-policy-2", response_attributes_2)
-
-        # publish message that satisfies the filter policy, assert that message is received
-        message_3 = "message-3"
-        aws_client.sns.publish(
-            TopicArn=topic_arn,
-            Message=message_3,
-            MessageAttributes={"def": {"DataType": "Number", "StringValue": "99"}},
-        )
-
-        response_3 = aws_client.sqs.receive_message(
-            QueueUrl=queue_url, VisibilityTimeout=0, WaitTimeSeconds=4
-        )
-        snapshot.match("messages-3", response_3)
-        num_msgs_3 = len(response_3["Messages"])
-        assert num_msgs_3 == num_msgs_1
-
-        # publish message that does not satisfy the filter policy, assert that message is not received
-        message_4 = "message-4"
-        aws_client.sns.publish(
-            TopicArn=topic_arn,
-            Message=message_4,
-            MessageAttributes={
-                "store": {"DataType": "Number", "StringValue": "99"},
-                "def": {"DataType": "Number", "StringValue": "99"},
-            },
-        )
-
-        response_4 = aws_client.sqs.receive_message(
-            QueueUrl=queue_url, VisibilityTimeout=0, WaitTimeSeconds=4
-        )
-        snapshot.match("messages-4", response_4)
-        num_msgs_4 = len(response_4["Messages"])
-        assert num_msgs_4 == num_msgs_3
-
-    @markers.aws.validated
-    def test_set_subscription_filter_policy_scope(
-        self, sqs_create_queue, sns_create_topic, sns_create_sqs_subscription, snapshot, aws_client
-    ):
-        topic_arn = sns_create_topic()["TopicArn"]
-        queue_url = sqs_create_queue()
-        subscription = sns_create_sqs_subscription(topic_arn=topic_arn, queue_url=queue_url)
-        subscription_arn = subscription["SubscriptionArn"]
-
-        # we fetch the default subscription attributes
-        # note: the FilterPolicyScope is not present in the response
-        subscription_attrs = aws_client.sns.get_subscription_attributes(
-            SubscriptionArn=subscription_arn
-        )
-        snapshot.match("sub-attrs-default", subscription_attrs)
-
-        aws_client.sns.set_subscription_attributes(
-            SubscriptionArn=subscription_arn,
-            AttributeName="FilterPolicyScope",
-            AttributeValue="MessageBody",
-        )
-
-        # we fetch the subscription attributes after setting the FilterPolicyScope
-        # note: the FilterPolicyScope is still not present in the response
-        subscription_attrs = aws_client.sns.get_subscription_attributes(
-            SubscriptionArn=subscription_arn
-        )
-        snapshot.match("sub-attrs-filter-scope-body", subscription_attrs)
-
-        # we try to set random values to the FilterPolicyScope
-        with pytest.raises(ClientError) as e:
-            aws_client.sns.set_subscription_attributes(
-                SubscriptionArn=subscription_arn,
-                AttributeName="FilterPolicyScope",
-                AttributeValue="RandomValue",
-            )
-
-        snapshot.match("sub-attrs-filter-scope-error", e.value.response)
-
-        # we try to set a FilterPolicy to see if it will show the FilterPolicyScope in the attributes
-        aws_client.sns.set_subscription_attributes(
-            SubscriptionArn=subscription_arn,
-            AttributeName="FilterPolicy",
-            AttributeValue=json.dumps({"attr": ["match-this"]}),
-        )
-        # the FilterPolicyScope is now present in the attributes
-        subscription_attrs = aws_client.sns.get_subscription_attributes(
-            SubscriptionArn=subscription_arn
-        )
-        snapshot.match("sub-attrs-after-setting-policy", subscription_attrs)
-
-    @markers.aws.validated
-    def test_sub_filter_policy_nested_property(
-        self, sqs_create_queue, sns_create_topic, sns_create_sqs_subscription, snapshot, aws_client
-    ):
-        topic_arn = sns_create_topic()["TopicArn"]
-        queue_url = sqs_create_queue()
-        subscription = sns_create_sqs_subscription(topic_arn=topic_arn, queue_url=queue_url)
-        subscription_arn = subscription["SubscriptionArn"]
-
-        # see https://aws.amazon.com/blogs/compute/introducing-payload-based-message-filtering-for-amazon-sns/
-        nested_filter_policy = {"object": {"key": [{"prefix": "auto-"}]}}
-        with pytest.raises(ClientError) as e:
-            aws_client.sns.set_subscription_attributes(
-                SubscriptionArn=subscription_arn,
-                AttributeName="FilterPolicy",
-                AttributeValue=json.dumps(nested_filter_policy),
-            )
-        snapshot.match("sub-filter-policy-nested-error", e.value.response)
-
-        aws_client.sns.set_subscription_attributes(
-            SubscriptionArn=subscription_arn,
-            AttributeName="FilterPolicyScope",
-            AttributeValue="MessageBody",
-        )
-
-        aws_client.sns.set_subscription_attributes(
-            SubscriptionArn=subscription_arn,
-            AttributeName="FilterPolicy",
-            AttributeValue=json.dumps(nested_filter_policy),
-        )
-
-        # the FilterPolicyScope is now present in the attributes
-        subscription_attrs = aws_client.sns.get_subscription_attributes(
-            SubscriptionArn=subscription_arn
-        )
-        snapshot.match("sub-attrs-after-setting-nested-policy", subscription_attrs)
-
-    @markers.aws.validated
-    @markers.snapshot.skip_snapshot_verify(
-        paths=[
-            "$.sub-filter-policy-rule-no-list.Error.Message",  # message contains java trace in AWS, assert instead
-        ]
-    )
-    def test_sub_filter_policy_nested_property_constraints(
-        self, sqs_create_queue, sns_create_topic, sns_create_sqs_subscription, snapshot, aws_client
-    ):
-        # https://docs.aws.amazon.com/sns/latest/dg/subscription-filter-policy-constraints.html
-        topic_arn = sns_create_topic()["TopicArn"]
-        queue_url = sqs_create_queue()
-        subscription = sns_create_sqs_subscription(topic_arn=topic_arn, queue_url=queue_url)
-        subscription_arn = subscription["SubscriptionArn"]
-
-        aws_client.sns.set_subscription_attributes(
-            SubscriptionArn=subscription_arn,
-            AttributeName="FilterPolicyScope",
-            AttributeValue="MessageBody",
-        )
-
-        nested_filter_policy = {
-            "key_a": {
-                "key_b": {"key_c": ["value_one", "value_two", "value_three", "value_four"]},
-            },
-            "key_d": {"key_e": ["value_one", "value_two", "value_three"]},
-            "key_f": ["value_one", "value_two", "value_three"],
-        }
-        # The first array has four values in a three-level nested key, and the second has three values in a two-level
-        # nested key. The total combination is calculated as follows:
-        # 3 x 4 x 2 x 3 x 1 x 3 = 216
-        with pytest.raises(ClientError) as e:
-            aws_client.sns.set_subscription_attributes(
-                SubscriptionArn=subscription_arn,
-                AttributeName="FilterPolicy",
-                AttributeValue=json.dumps(nested_filter_policy),
-            )
-        snapshot.match("sub-filter-policy-nested-error-too-many-combinations", e.value.response)
-
-        flat_filter_policy = {
-            "key_a": ["value_one"],
-            "key_b": ["value_two"],
-            "key_c": ["value_three"],
-            "key_d": ["value_four"],
-            "key_e": ["value_five"],
-            "key_f": ["value_six"],
-        }
-        # A filter policy can have a maximum of five attribute names. For a nested policy, only parent keys are counted.
-        with pytest.raises(ClientError) as e:
-            aws_client.sns.set_subscription_attributes(
-                SubscriptionArn=subscription_arn,
-                AttributeName="FilterPolicy",
-                AttributeValue=json.dumps(flat_filter_policy),
-            )
-        snapshot.match("sub-filter-policy-max-attr-keys", e.value.response)
-
-        flat_filter_policy = {"key_a": "value_one"}
-        # Rules should be contained in a list
-        with pytest.raises(ClientError) as e:
-            aws_client.sns.set_subscription_attributes(
-                SubscriptionArn=subscription_arn,
-                AttributeName="FilterPolicy",
-                AttributeValue=json.dumps(flat_filter_policy),
-            )
-        snapshot.match("sub-filter-policy-rule-no-list", e.value.response)
-        assert e.value.response["Error"]["Message"].startswith(
-            'Invalid parameter: FilterPolicy: "key_a" must be an object or an array'
-        )
-
-    @markers.aws.validated
-    @pytest.mark.parametrize("raw_message_delivery", [True, False])
-    def test_filter_policy_on_message_body(
-        self,
-        sqs_create_queue,
-        sns_create_topic,
-        sns_create_sqs_subscription,
-        snapshot,
-        raw_message_delivery,
-        aws_client,
-    ):
-        topic_arn = sns_create_topic()["TopicArn"]
-        queue_url = sqs_create_queue()
-        subscription = sns_create_sqs_subscription(topic_arn=topic_arn, queue_url=queue_url)
-        subscription_arn = subscription["SubscriptionArn"]
-        # see https://aws.amazon.com/blogs/compute/introducing-payload-based-message-filtering-for-amazon-sns/
-        nested_filter_policy = {
-            "object": {
-                "key": [{"prefix": "auto-"}, "hardcodedvalue"],
-                "nested_key": [{"exists": False}],
-            },
-            "test": [{"exists": False}],
-        }
-
-        aws_client.sns.set_subscription_attributes(
-            SubscriptionArn=subscription_arn,
-            AttributeName="FilterPolicyScope",
-            AttributeValue="MessageBody",
-        )
-
-        aws_client.sns.set_subscription_attributes(
-            SubscriptionArn=subscription_arn,
-            AttributeName="FilterPolicy",
-            AttributeValue=json.dumps(nested_filter_policy),
-        )
-
-        if raw_message_delivery:
-            aws_client.sns.set_subscription_attributes(
-                SubscriptionArn=subscription_arn,
-                AttributeName="RawMessageDelivery",
-                AttributeValue="true",
-            )
-
-        response = aws_client.sqs.receive_message(
-            QueueUrl=queue_url, VisibilityTimeout=0, WaitTimeSeconds=1
-        )
-        snapshot.match("recv-init", response)
-        # assert there are no messages in the queue
-        assert "Messages" not in response or response["Messages"] == []
-
-        # publish messages that satisfies the filter policy, assert that messages are received
-        messages = [
-            {"object": {"key": "auto-test"}},
-            {"object": {"key": "hardcodedvalue"}},
-        ]
-        for i, message in enumerate(messages):
-            aws_client.sns.publish(
-                TopicArn=topic_arn,
-                Message=json.dumps(message),
-            )
-
-            response = aws_client.sqs.receive_message(
-                QueueUrl=queue_url,
-                VisibilityTimeout=0,
-                WaitTimeSeconds=5 if is_aws_cloud() else 2,
-            )
-            snapshot.match(f"recv-passed-msg-{i}", response)
-            receipt_handle = response["Messages"][0]["ReceiptHandle"]
-            aws_client.sqs.delete_message(QueueUrl=queue_url, ReceiptHandle=receipt_handle)
-
-        # publish messages that do not satisfy the filter policy, assert those messages are not received
-        messages = [
-            {"object": {"key": "test-auto"}},
-            {"object": {"key": "auto-test"}, "test": "just-exists"},
-            {"object": {"key": "auto-test", "nested_key": "just-exists"}},
-            {"object": {"test": "auto-test"}},
-            {"test": "auto-test"},
-        ]
-        for message in messages:
-            aws_client.sns.publish(
-                TopicArn=topic_arn,
-                Message=json.dumps(message),
-            )
-
-        response = aws_client.sqs.receive_message(
-            QueueUrl=queue_url, VisibilityTimeout=0, WaitTimeSeconds=5 if is_aws_cloud() else 2
-        )
-        # assert there are no messages in the queue
-        assert "Messages" not in response or response["Messages"] == []
-
-        # publish message that does not satisfy the filter policy as it's not even JSON, or not a JSON object
-        message = "Regular string message"
-        aws_client.sns.publish(
-            TopicArn=topic_arn,
-            Message=message,
-        )
-        aws_client.sns.publish(
-            TopicArn=topic_arn,
-            Message=json.dumps(message),  # send it JSON encoded, but not an object
-        )
-
-        response = aws_client.sqs.receive_message(
-            QueueUrl=queue_url, VisibilityTimeout=0, WaitTimeSeconds=2
-        )
-        # assert there are no messages in the queue
-        assert "Messages" not in response or response["Messages"] == []
-
-    @markers.aws.validated
-    def test_filter_policy_for_batch(
-        self, sqs_create_queue, sns_create_topic, sns_create_sqs_subscription, snapshot, aws_client
-    ):
-        topic_arn = sns_create_topic()["TopicArn"]
-        queue_url_with_filter = sqs_create_queue()
-        subscription_with_filter = sns_create_sqs_subscription(
-            topic_arn=topic_arn, queue_url=queue_url_with_filter
-        )
-        subscription_with_filter_arn = subscription_with_filter["SubscriptionArn"]
-
-        queue_url_no_filter = sqs_create_queue()
-        subscription_no_filter = sns_create_sqs_subscription(
-            topic_arn=topic_arn, queue_url=queue_url_no_filter
-        )
-        subscription_no_filter_arn = subscription_no_filter["SubscriptionArn"]
-
-        filter_policy = {"attr1": [{"numeric": [">", 0, "<=", 100]}]}
-        aws_client.sns.set_subscription_attributes(
-            SubscriptionArn=subscription_with_filter_arn,
-            AttributeName="FilterPolicy",
-            AttributeValue=json.dumps(filter_policy),
-        )
-
-        response_attributes = aws_client.sns.get_subscription_attributes(
-            SubscriptionArn=subscription_with_filter_arn
-        )
-        snapshot.match("subscription-attributes-with-filter", response_attributes)
-
-        response_attributes = aws_client.sns.get_subscription_attributes(
-            SubscriptionArn=subscription_no_filter_arn
-        )
-        snapshot.match("subscription-attributes-no-filter", response_attributes)
-
-        sqs_wait_time = 4 if is_aws_cloud() else 1
-
-        response_before_publish_no_filter = aws_client.sqs.receive_message(
-            QueueUrl=queue_url_with_filter, VisibilityTimeout=0, WaitTimeSeconds=sqs_wait_time
-        )
-        snapshot.match("messages-no-filter-before-publish", response_before_publish_no_filter)
-
-        response_before_publish_filter = aws_client.sqs.receive_message(
-            QueueUrl=queue_url_with_filter, VisibilityTimeout=0, WaitTimeSeconds=sqs_wait_time
-        )
-        snapshot.match("messages-with-filter-before-publish", response_before_publish_filter)
-
-        # publish message that satisfies the filter policy, assert that message is received
-        message = "This is a test message"
-        message_attributes = {"attr1": {"DataType": "Number", "StringValue": "99"}}
-        aws_client.sns.publish_batch(
-            TopicArn=topic_arn,
-            PublishBatchRequestEntries=[
-                {
-                    "Id": "1",
-                    "Message": message,
-                    "MessageAttributes": message_attributes,
-                }
-            ],
-        )
-
-        response_after_publish_no_filter = aws_client.sqs.receive_message(
-            QueueUrl=queue_url_no_filter, VisibilityTimeout=0, WaitTimeSeconds=sqs_wait_time
-        )
-        snapshot.match("messages-no-filter-after-publish-ok", response_after_publish_no_filter)
-        aws_client.sqs.delete_message(
-            QueueUrl=queue_url_no_filter,
-            ReceiptHandle=response_after_publish_no_filter["Messages"][0]["ReceiptHandle"],
-        )
-
-        response_after_publish_filter = aws_client.sqs.receive_message(
-            QueueUrl=queue_url_with_filter, VisibilityTimeout=0, WaitTimeSeconds=sqs_wait_time
-        )
-        snapshot.match("messages-with-filter-after-publish-ok", response_after_publish_filter)
-        aws_client.sqs.delete_message(
-            QueueUrl=queue_url_with_filter,
-            ReceiptHandle=response_after_publish_filter["Messages"][0]["ReceiptHandle"],
-        )
-
-        # publish message that does not satisfy the filter policy, assert that message is not received by the
-        # subscription with the filter and received by the other
-        aws_client.sns.publish_batch(
-            TopicArn=topic_arn,
-            PublishBatchRequestEntries=[
-                {
-                    "Id": "1",
-                    "Message": "This is another test message",
-                    "MessageAttributes": {"attr1": {"DataType": "Number", "StringValue": "111"}},
-                }
-            ],
-        )
-
-        response_after_publish_no_filter = aws_client.sqs.receive_message(
-            QueueUrl=queue_url_no_filter, VisibilityTimeout=0, WaitTimeSeconds=sqs_wait_time
-        )
-        # there should be 1 message in the queue, latest sent
-        snapshot.match("messages-no-filter-after-publish-ok-1", response_after_publish_no_filter)
-
-        response_after_publish_filter = aws_client.sqs.receive_message(
-            QueueUrl=queue_url_with_filter, VisibilityTimeout=0, WaitTimeSeconds=sqs_wait_time
-        )
-        # there should be no messages in this queue
-        snapshot.match("messages-with-filter-after-publish-filtered", response_after_publish_filter)
-
-    @markers.aws.validated
-    def test_filter_policy_on_message_body_dot_attribute(
-        self,
-        sqs_create_queue,
-        sns_create_topic,
-        sns_create_sqs_subscription,
-        snapshot,
-        aws_client,
-    ):
-        topic_arn = sns_create_topic()["TopicArn"]
-        queue_url = sqs_create_queue()
-        subscription = sns_create_sqs_subscription(topic_arn=topic_arn, queue_url=queue_url)
-        subscription_arn = subscription["SubscriptionArn"]
-
-        nested_filter_policy = json.dumps(
-            {
-                "object.nested": ["string.value"],
-            }
-        )
-
-        aws_client.sns.set_subscription_attributes(
-            SubscriptionArn=subscription_arn,
-            AttributeName="FilterPolicyScope",
-            AttributeValue="MessageBody",
-        )
-
-        aws_client.sns.set_subscription_attributes(
-            SubscriptionArn=subscription_arn,
-            AttributeName="FilterPolicy",
-            AttributeValue=nested_filter_policy,
-        )
-
-        def get_filter_policy():
-            subscription_attrs = aws_client.sns.get_subscription_attributes(
-                SubscriptionArn=subscription_arn
-            )
-            return subscription_attrs["Attributes"]["FilterPolicy"]
-
-        # wait for the new filter policy to be in effect
-        poll_condition(lambda: get_filter_policy() == nested_filter_policy, timeout=4)
-
-        response = aws_client.sqs.receive_message(
-            QueueUrl=queue_url, VisibilityTimeout=0, WaitTimeSeconds=1
-        )
-        snapshot.match("recv-init", response)
-        # assert there are no messages in the queue
-        assert "Messages" not in response or response["Messages"] == []
-
-        def _verify_and_snapshot_sqs_messages(msg_to_send: list[dict], snapshot_prefix: str):
-            for i, _message in enumerate(msg_to_send):
-                aws_client.sns.publish(
-                    TopicArn=topic_arn,
-                    Message=json.dumps(_message),
-                )
-
-                _response = aws_client.sqs.receive_message(
-                    QueueUrl=queue_url,
-                    VisibilityTimeout=0,
-                    WaitTimeSeconds=5 if is_aws_cloud() else 2,
-                )
-                snapshot.match(f"{snapshot_prefix}-{i}", _response)
-                receipt_handle = _response["Messages"][0]["ReceiptHandle"]
-                aws_client.sqs.delete_message(QueueUrl=queue_url, ReceiptHandle=receipt_handle)
-
-        # publish messages that satisfies the filter policy, assert that messages are received
-        messages = [
-            {"object": {"nested": "string.value"}},
-            {"object.nested": "string.value"},
-        ]
-        _verify_and_snapshot_sqs_messages(messages, snapshot_prefix="recv-nested-msg")
-
-        # publish messages that do not satisfy the filter policy, assert those messages are not received
-        messages = [
-            {"object": {"nested": "test-auto"}},
-        ]
-        for message in messages:
-            aws_client.sns.publish(
-                TopicArn=topic_arn,
-                Message=json.dumps(message),
-            )
-
-        response = aws_client.sqs.receive_message(
-            QueueUrl=queue_url, VisibilityTimeout=0, WaitTimeSeconds=5 if is_aws_cloud() else 2
-        )
-        # assert there are no messages in the queue
-        assert "Messages" not in response or response["Messages"] == []
-
-        # assert with more nesting
-        deep_nested_filter_policy = json.dumps(
-            {
-                "object.nested.test": ["string.value"],
-            }
-        )
-
-        aws_client.sns.set_subscription_attributes(
-            SubscriptionArn=subscription_arn,
-            AttributeName="FilterPolicy",
-            AttributeValue=deep_nested_filter_policy,
-        )
-        # wait for the new filter policy to be in effect
-        poll_condition(lambda: get_filter_policy() == deep_nested_filter_policy, timeout=4)
-
-        messages = [
-            {"object": {"nested": {"test": "string.value"}}},
-            {"object.nested.test": "string.value"},
-            {"object.nested": {"test": "string.value"}},
-            {"object": {"nested.test": "string.value"}},
-        ]
-        _verify_and_snapshot_sqs_messages(messages, snapshot_prefix="recv-deep-nested-msg")
-        # publish messages that do not satisfy the filter policy, assert those messages are not received
-        messages = [
-            {"object": {"nested": {"test": "string.notvalue"}}},
-        ]
-        for message in messages:
-            aws_client.sns.publish(
-                TopicArn=topic_arn,
-                Message=json.dumps(message),
-            )
-
-        response = aws_client.sqs.receive_message(
-            QueueUrl=queue_url, VisibilityTimeout=0, WaitTimeSeconds=5 if is_aws_cloud() else 2
-        )
-        # assert there are no messages in the queue
-        assert "Messages" not in response or response["Messages"] == []
-
-
 class TestSNSPlatformEndpoint:
     @markers.aws.only_localstack
     def test_subscribe_platform_endpoint(
@@ -3812,6 +3147,35 @@ class TestSNSSMS:
 
 
 class TestSNSSubscriptionHttp:
+    @markers.aws.validated
+    def test_http_subscription_response(
+        self,
+        sns_create_topic,
+        sns_subscription,
+        aws_client,
+        snapshot,
+    ):
+        topic_arn = sns_create_topic()["TopicArn"]
+        snapshot.match("topic-arn", {"TopicArn": topic_arn})
+
+        # we need to hit whatever URL, even external, the publishing is async, but we need an endpoint who won't
+        # confirm the subscription
+        subscription = sns_subscription(
+            TopicArn=topic_arn,
+            Protocol="http",
+            Endpoint="http://example.com",
+            ReturnSubscriptionArn=False,
+        )
+        snapshot.match("subscription", subscription)
+
+        subscription_with_arn = sns_subscription(
+            TopicArn=topic_arn,
+            Protocol="http",
+            Endpoint="http://example.com",
+            ReturnSubscriptionArn=True,
+        )
+        snapshot.match("subscription-with-arn", subscription_with_arn)
+
     @markers.aws.manual_setup_required
     def test_redrive_policy_http_subscription(
         self, sns_create_topic, sqs_create_queue, sqs_get_queue_arn, sns_subscription, aws_client
@@ -4380,6 +3744,15 @@ class TestSNSMultiAccounts:
         subscriptions = [s["SubscriptionArn"] for s in response["Subscriptions"]]
         assert subscription_arn in subscriptions
 
+        response = sns_primary_client.set_subscription_attributes(
+            SubscriptionArn=subscription_arn,
+            AttributeName="RawMessageDelivery",
+            AttributeValue="true",
+        )
+        assert response["ResponseMetadata"]["HTTPStatusCode"] == 200
+        response = sns_primary_client.get_subscription_attributes(SubscriptionArn=subscription_arn)
+        assert response["Attributes"]["RawMessageDelivery"] == "true"
+
         assert sns_secondary_client.delete_topic(TopicArn=topic_arn)
 
     @markers.aws.only_localstack
@@ -4421,6 +3794,17 @@ class TestSNSMultiAccounts:
             region_name,
         )
 
+        # create a second queue with the secondary AccountId
+        queue_name_2 = "sample_queue_two"
+        queue_3 = sqs_secondary_client.create_queue(QueueName=queue_name_2)
+        queue_3_url = queue_3["QueueUrl"]
+        # test that we get the right queue URL at the same time, even if we use the primary client
+        queue_3_arn = sqs_queue_arn(
+            queue_3_url,
+            secondary_account_id,
+            region_name,
+        )
+
         # test that we can subscribe with the primary client to a queue from the same account
         sns_primary_client.subscribe(
             TopicArn=topic_1_arn,
@@ -4435,8 +3819,17 @@ class TestSNSMultiAccounts:
             Endpoint=queue_2_arn,
         )
 
-        # now, we have 2 subscriptions in topic_1, one to the queue_1 located in the same account, and to queue_2
-        # located in the secondary account
+        # test that we can subscribe with the secondary client (not owning the topic) to a queue of the secondary client
+        sns_secondary_client.subscribe(
+            TopicArn=topic_1_arn,
+            Protocol="sqs",
+            Endpoint=queue_3_arn,
+        )
+
+        # now, we have 3 subscriptions in topic_1, one to the queue_1 located in the same account, and 2 to queue_2 and
+        # queue_3 located in the secondary account
+        subscriptions = sns_primary_client.list_subscriptions_by_topic(TopicArn=topic_1_arn)
+        assert len(subscriptions["Subscriptions"]) == 3
 
         sns_primary_client.publish(TopicArn=topic_1_arn, Message="TestMessageOwner")
 
@@ -4444,6 +3837,7 @@ class TestSNSMultiAccounts:
             for client, queue_url in (
                 (sqs_primary_client, queue_1_url),
                 (sqs_secondary_client, queue_2_url),
+                (sqs_secondary_client, queue_3_url),
             ):
                 response = client.receive_message(
                     QueueUrl=queue_url,

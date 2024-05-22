@@ -6,7 +6,7 @@
 /CODEOWNERS @thrau @dominikschubert @alexrashed
 
 # README / Docs
-/doc/ @HarshCasper
+/docs/ @thrau @HarshCasper
 /README.md @HarshCasper
 /CODE_OF_CONDUCT.md @HarshCasper
 /CONTRIBUTING.md @HarshCasper
@@ -92,7 +92,7 @@
 /localstack/testing/pytest/container.py @dominikschubert @simonrw
 
 # Test Selection
-/localstack/testing/testselection @dominikschubert @alexrashed 
+/localstack/testing/testselection @dominikschubert @alexrashed @silv-io
 
 ######################
 ### SERVICE OWNERS ###
@@ -105,10 +105,10 @@
 /tests/aws/services/acm/ @alexrashed
 
 # apigateway
-/localstack/aws/api/apigateway/ @bentsku
-/localstack/services/apigateway/ @bentsku
-/tests/aws/services/apigateway/ @bentsku
-/tests/unit/test_apigateway.py @bentsku
+/localstack/aws/api/apigateway/ @bentsku @cloutierMat
+/localstack/services/apigateway/ @bentsku @cloutierMat
+/tests/aws/services/apigateway/ @bentsku @cloutierMat
+/tests/unit/test_apigateway.py @bentsku @cloutierMat
 
 # cloudformation
 /localstack/aws/api/cloudformation/ @dominikschubert @pinzon @simonrw @Morijarti
@@ -231,9 +231,9 @@
 /tests/aws/services/ssm/ @dominikschubert
 
 # stepfunctions
-/localstack/aws/api/stepfunctions/ @dominikschubert @MEPalma
-/localstack/services/stepfunctions/ @dominikschubert @MEPalma
-/tests/aws/services/stepfunctions/ @dominikschubert @MEPalma
+/localstack/aws/api/stepfunctions/ @MEPalma @joe4dev @dominikschubert
+/localstack/services/stepfunctions/ @MEPalma @joe4dev @dominikschubert
+/tests/aws/services/stepfunctions/ @MEPalma @joe4dev @dominikschubert
 
 # sts
 /localstack/aws/api/sts/ @pinzon

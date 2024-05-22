@@ -38,11 +38,11 @@ from localstack.services.stepfunctions.asl.component.state.state_execution.state
     IterationWorker,
 )
 from localstack.services.stepfunctions.asl.component.state.state_execution.state_map.iteration.job import (
-    Job,
+    JobClosed,
     JobPool,
 )
 from localstack.services.stepfunctions.asl.component.state.state_execution.state_map.max_concurrency import (
-    MaxConcurrency,
+    DEFAULT_MAX_CONCURRENCY_VALUE,
 )
 from localstack.services.stepfunctions.asl.component.states import States
 from localstack.services.stepfunctions.asl.eval.environment import Environment
@@ -123,7 +123,9 @@ class DistributedIterationComponent(InlineIterationComponent, abc.ABC):
         # TODO: add watch on map_run_record update event and adjust the number of running workers accordingly.
         max_concurrency = self._map_run_record.max_concurrency
         workers_number = (
-            len(input_items) if max_concurrency == MaxConcurrency.DEFAULT else max_concurrency
+            len(input_items)
+            if max_concurrency == DEFAULT_MAX_CONCURRENCY_VALUE
+            else max_concurrency
         )
         self._set_active_workers(workers_number=workers_number, env=env)
 
@@ -133,7 +135,7 @@ class DistributedIterationComponent(InlineIterationComponent, abc.ABC):
         if worker_exception is not None:
             raise worker_exception
 
-        closed_jobs: list[Job] = self._job_pool.get_closed_jobs()
+        closed_jobs: list[JobClosed] = self._job_pool.get_closed_jobs()
         outputs: list[Any] = [closed_job.job_output for closed_job in closed_jobs]
 
         env.stack.append(outputs)
@@ -200,6 +202,8 @@ class DistributedIterationComponent(InlineIterationComponent, abc.ABC):
             raise ex
         finally:
             env.event_history = execution_event_history
+            self._eval_input = None
+            self._workers.clear()
 
         # TODO: review workflow of program stops and maprunstops
         # program_state = env.program_state()

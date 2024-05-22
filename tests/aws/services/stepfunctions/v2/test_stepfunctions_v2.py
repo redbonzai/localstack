@@ -8,7 +8,7 @@ from localstack.constants import (
     SECONDARY_TEST_AWS_ACCESS_KEY_ID,
     SECONDARY_TEST_AWS_SECRET_ACCESS_KEY,
 )
-from localstack.services.events.provider import TEST_EVENTS_CACHE
+from localstack.services.events.v1.provider import TEST_EVENTS_CACHE
 from localstack.testing.aws.util import is_aws_cloud
 from localstack.testing.pytest import markers
 from localstack.utils import testutil
@@ -831,3 +831,4 @@ def test_run_aws_sdk_secrets_manager(aws_client, account_id):
 
     # clean up
     cleanup(sm_arn, state_machines_before, aws_client.stepfunctions)
+    # TODO also clean up other resources (like secrets)

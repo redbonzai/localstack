@@ -1,4 +1,4 @@
-# Generated from /Users/mep/LocalStack/localstack/localstack/services/stepfunctions/asl/antlr/ASLParser.g4 by ANTLR 4.13.1
+# Generated from ASLParser.g4 by ANTLR 4.13.1
 from antlr4 import *
 if "." in __name__:
     from .ASLParser import ASLParser
@@ -166,6 +166,11 @@ class ASLParserVisitor(ParseTreeVisitor):
 
     # Visit a parse tree produced by ASLParser#max_concurrency_decl.
     def visitMax_concurrency_decl(self, ctx:ASLParser.Max_concurrency_declContext):
+        return self.visitChildren(ctx)
+
+
+    # Visit a parse tree produced by ASLParser#max_concurrency_path_decl.
+    def visitMax_concurrency_path_decl(self, ctx:ASLParser.Max_concurrency_path_declContext):
         return self.visitChildren(ctx)
 
 

@@ -1,80 +1,192 @@
-import datetime
-import ipaddress
+import base64
 import json
 import logging
-import os
 import re
-import time
-from typing import Any, Dict, List, Optional
+from datetime import datetime, timezone
+from typing import Callable, Optional
 
-from moto.events import events_backends
-from moto.events.responses import EventsHandler as MotoEventsHandler
-from werkzeug import Request
-from werkzeug.exceptions import NotFound
-
-from localstack import config
-from localstack.aws.api import RequestContext
-from localstack.aws.api.core import CommonServiceException, ServiceException
+from localstack.aws.api import RequestContext, handler
+from localstack.aws.api.config import TagsList
 from localstack.aws.api.events import (
+    Arn,
     Boolean,
-    ConnectionAuthorizationType,
-    ConnectionDescription,
-    ConnectionName,
-    CreateConnectionAuthRequestParameters,
-    CreateConnectionResponse,
+    CreateEventBusResponse,
+    DeadLetterConfig,
+    DescribeEventBusResponse,
+    DescribeRuleResponse,
+    EndpointId,
+    EventBusDescription,
+    EventBusList,
+    EventBusName,
     EventBusNameOrArn,
     EventPattern,
     EventsApi,
+    EventSourceName,
+    InvalidEventPatternException,
+    KmsKeyIdentifier,
+    LimitMax100,
+    ListEventBusesResponse,
+    ListRuleNamesByTargetResponse,
+    ListRulesResponse,
+    ListTagsForResourceResponse,
+    ListTargetsByRuleResponse,
+    NextToken,
+    PutEventsRequestEntry,
+    PutEventsRequestEntryList,
+    PutEventsResponse,
+    PutEventsResultEntry,
+    PutEventsResultEntryList,
+    PutPartnerEventsRequestEntryList,
+    PutPartnerEventsResponse,
     PutRuleResponse,
     PutTargetsResponse,
+    RemoveTargetsResponse,
+    ResourceAlreadyExistsException,
+    ResourceNotFoundException,
     RoleArn,
+    RuleArn,
     RuleDescription,
     RuleName,
+    RuleResponseList,
     RuleState,
     ScheduleExpression,
-    String,
+    TagKeyList,
     TagList,
+    TagResourceResponse,
+    Target,
+    TargetArn,
+    TargetId,
+    TargetIdList,
     TargetList,
     TestEventPatternResponse,
+    UntagResourceResponse,
 )
-from localstack.constants import APPLICATION_AMZ_JSON_1_1
-from localstack.http import route
-from localstack.services.edge import ROUTER
-from localstack.services.events.models import EventsStore, events_stores
+from localstack.aws.api.events import EventBus as ApiTypeEventBus
+from localstack.aws.api.events import Rule as ApiTypeRule
+from localstack.services.events.event_bus import EventBusService, EventBusServiceDict
+from localstack.services.events.event_ruler import matches_rule
+from localstack.services.events.models import (
+    EventBus,
+    EventBusDict,
+    EventsStore,
+    FormattedEvent,
+    ResourceType,
+    Rule,
+    RuleDict,
+    TargetDict,
+    ValidationException,
+    events_store,
+)
+from localstack.services.events.models import (
+    InvalidEventPatternException as InternalInvalidEventPatternException,
+)
+from localstack.services.events.rule import RuleService, RuleServiceDict
 from localstack.services.events.scheduler import JobScheduler
-from localstack.services.moto import call_moto
+from localstack.services.events.target import TargetSender, TargetSenderDict, TargetSenderFactory
 from localstack.services.plugins import ServiceLifecycleHook
-from localstack.utils.aws.arns import event_bus_arn, parse_arn
-from localstack.utils.aws.client_types import ServicePrincipal
-from localstack.utils.aws.message_forwarding import send_event_to_target
-from localstack.utils.collections import pick_attributes
-from localstack.utils.common import TMP_FILES, mkdir, save_file, truncate
-from localstack.utils.json import extract_jsonpath
-from localstack.utils.strings import long_uid, short_uid
+from localstack.utils.aws.arns import parse_arn
+from localstack.utils.common import truncate
+from localstack.utils.strings import long_uid
 from localstack.utils.time import TIMESTAMP_FORMAT_TZ, timestamp
 
 LOG = logging.getLogger(__name__)
 
-# list of events used to run assertions during integration testing (not exposed to the user)
-TEST_EVENTS_CACHE = []
-EVENTS_TMP_DIR = "cw_events"
-DEFAULT_EVENT_BUS_NAME = "default"
-CONTENT_BASE_FILTER_KEYWORDS = ["prefix", "anything-but", "numeric", "cidr", "exists"]
-CONNECTION_NAME_PATTERN = re.compile("^[\\.\\-_A-Za-z0-9]+$")
+RULE_ARN_CUSTOM_EVENT_BUS_PATTERN = re.compile(
+    r"^arn:aws:events:[a-z0-9-]+:\d{12}:rule/[a-zA-Z0-9_-]+/[a-zA-Z0-9_-]+$"
+)
 
 
-class ValidationException(ServiceException):
-    code: str = "ValidationException"
-    sender_fault: bool = True
-    status_code: int = 400
+def decode_next_token(token: NextToken) -> int:
+    """Decode a pagination token from base64 to integer."""
+    return int.from_bytes(base64.b64decode(token), "big")
+
+
+def encode_next_token(token: int) -> NextToken:
+    """Encode a pagination token to base64 from integer."""
+    return base64.b64encode(token.to_bytes(128, "big")).decode("utf-8")
+
+
+def get_filtered_dict(name_prefix: str, input_dict: dict) -> dict:
+    """Filter dictionary by prefix."""
+    return {name: value for name, value in input_dict.items() if name.startswith(name_prefix)}
+
+
+def get_event_time(event: PutEventsRequestEntry) -> str:
+    event_time = datetime.now(timezone.utc)
+    if event_timestamp := event.get("Time"):
+        try:
+            # use time from event if provided
+            event_time = event_timestamp.replace(tzinfo=timezone.utc)
+        except ValueError:
+            # use current time if event time is invalid
+            LOG.debug(
+                "Could not parse the `Time` parameter, falling back to current time for the following Event: '%s'",
+                event,
+            )
+    formatted_time_string = event_time.strftime("%Y-%m-%dT%H:%M:%SZ")
+    return formatted_time_string
+
+
+def validate_event(event: PutEventsRequestEntry) -> None | PutEventsResultEntry:
+    if not event.get("Source"):
+        return {
+            "ErrorCode": "InvalidArgument",
+            "ErrorMessage": "Parameter Source is not valid. Reason: Source is a required argument.",
+        }
+    elif not event.get("DetailType"):
+        return {
+            "ErrorCode": "InvalidArgument",
+            "ErrorMessage": "Parameter DetailType is not valid. Reason: DetailType is a required argument.",
+        }
+    elif not event.get("Detail"):
+        return {
+            "ErrorCode": "InvalidArgument",
+            "ErrorMessage": "Parameter Detail is not valid. Reason: Detail is a required argument.",
+        }
+
+
+def format_event(event: PutEventsRequestEntry, region: str, account_id: str) -> FormattedEvent:
+    # See https://docs.aws.amazon.com/AmazonS3/latest/userguide/ev-events.html
+    formatted_event = {
+        "version": "0",
+        "id": str(long_uid()),
+        "detail-type": event.get("DetailType"),
+        "source": event.get("Source"),
+        "account": account_id,
+        "time": get_event_time(event),
+        "region": region,
+        "resources": event.get("Resources", []),
+        "detail": json.loads(event.get("Detail", "{}")),
+    }
+
+    return formatted_event
+
+
+def get_resource_type(arn: Arn) -> ResourceType:
+    parsed_arn = parse_arn(arn)
+    resource_type = parsed_arn["resource"].split("/", 1)[0]
+    if resource_type == "event-bus":
+        return ResourceType.EVENT_BUS
+    if resource_type == "rule":
+        return ResourceType.RULE
+    raise ValidationException(
+        f"Parameter {arn} is not valid. Reason: Provided Arn is not in correct format."
+    )
+
+
+def check_unique_tags(tags: TagsList) -> None:
+    unique_tag_keys = {tag["Key"] for tag in tags}
+    if len(unique_tag_keys) < len(tags):
+        raise ValidationException("Invalid parameter: Duplicated keys are not allowed.")
 
 
 class EventsProvider(EventsApi, ServiceLifecycleHook):
+    # api methods are grouped by resource type and sorted in hierarchical order
+    # each group is sorted alphabetically
     def __init__(self):
-        apply_patches()
-
-    def on_after_init(self):
-        ROUTER.add(self.trigger_scheduled_rule)
+        self._event_bus_services_store: EventBusServiceDict = {}
+        self._rule_services_store: RuleServiceDict = {}
+        self._target_sender_store: TargetSenderDict = {}
 
     def on_before_start(self):
         JobScheduler.start()
@@ -82,169 +194,193 @@ class EventsProvider(EventsApi, ServiceLifecycleHook):
     def on_before_stop(self):
         JobScheduler.shutdown()
 
-    @route("/_aws/events/rules/<path:rule_arn>/trigger")
-    def trigger_scheduled_rule(self, request: Request, rule_arn: str):
-        """Developer endpoint to trigger a scheduled rule."""
-        arn_data = parse_arn(rule_arn)
-        account_id = arn_data["account"]
-        region = arn_data["region"]
-        rule_name = arn_data["resource"].split("/", maxsplit=1)[-1]
+    ##########
+    # EventBus
+    ##########
 
-        job_id = events_stores[account_id][region].rule_scheduled_jobs.get(rule_name)
-        if not job_id:
-            raise NotFound()
-        job = JobScheduler().instance().get_job(job_id)
-        if not job:
-            raise NotFound()
-
-        # TODO: once job scheduler is refactored, we can update the deadline of the task instead of running
-        #  it here
-        job.run()
-
-    @staticmethod
-    def get_store(context: RequestContext) -> EventsStore:
-        return events_stores[context.account_id][context.region]
-
-    def test_event_pattern(
-        self, context: RequestContext, event_pattern: EventPattern, event: String, **kwargs
-    ) -> TestEventPatternResponse:
-        # https://docs.aws.amazon.com/eventbridge/latest/APIReference/API_TestEventPattern.html
-        # Test event pattern uses event pattern to match against event.
-        # So event pattern keys must be in the event keys and values must match.
-        # If event pattern has a key that event does not have, it is not a match.
-        evt_pattern = json.loads(str(event_pattern))
-        evt = json.loads(str(event))
-
-        if any(key not in evt or evt[key] not in values for key, values in evt_pattern.items()):
-            return TestEventPatternResponse(Result=False)
-        return TestEventPatternResponse(Result=True)
-
-    @staticmethod
-    def get_scheduled_rule_func(
-        store: EventsStore,
-        rule_name: RuleName,
-        event_bus_name_or_arn: Optional[EventBusNameOrArn] = None,
-    ):
-        def func(*args, **kwargs):
-            account_id = store._account_id
-            region = store._region_name
-            moto_backend = events_backends[account_id][region]
-            event_bus_name = get_event_bus_name(event_bus_name_or_arn)
-            event_bus = moto_backend.event_buses[event_bus_name]
-            rule = event_bus.rules.get(rule_name)
-            if not rule:
-                LOG.info("Unable to find rule `%s` for event bus `%s`", rule_name, event_bus_name)
-                return
-            if rule.targets:
-                LOG.debug(
-                    "Notifying %s targets in response to triggered Events rule %s",
-                    len(rule.targets),
-                    rule_name,
-                )
-
-            default_event = {
-                "version": "0",
-                "id": long_uid(),
-                "detail-type": "Scheduled Event",
-                "source": "aws.events",
-                "account": account_id,
-                "time": timestamp(format=TIMESTAMP_FORMAT_TZ),
-                "region": region,
-                "resources": [rule.arn],
-                "detail": {},
-            }
-
-            for target in rule.targets:
-                arn = target.get("Arn")
-
-                if input_ := target.get("Input"):
-                    event = json.loads(input_)
-                else:
-                    event = default_event
-                    if target.get("InputPath"):
-                        event = filter_event_with_target_input_path(target, event)
-                    if input_transformer := target.get("InputTransformer"):
-                        event = process_event_with_input_transformer(input_transformer, event)
-
-                attr = pick_attributes(target, ["$.SqsParameters", "$.KinesisParameters"])
-
-                try:
-                    send_event_to_target(
-                        arn,
-                        event,
-                        target_attributes=attr,
-                        role=target.get("RoleArn"),
-                        target=target,
-                        source_arn=rule.arn,
-                        source_service=ServicePrincipal.events,
-                    )
-                except Exception as e:
-                    LOG.info(
-                        "Unable to send event notification %s to target %s: %s",
-                        truncate(event),
-                        target,
-                        e,
-                    )
-
-        return func
-
-    @staticmethod
-    def convert_schedule_to_cron(schedule):
-        """Convert Events schedule like "cron(0 20 * * ? *)" or "rate(5 minutes)" """
-        cron_regex = r"\s*cron\s*\(([^\)]*)\)\s*"
-        if re.match(cron_regex, schedule):
-            cron = re.sub(cron_regex, r"\1", schedule)
-            return cron
-        rate_regex = r"\s*rate\s*\(([^\)]*)\)\s*"
-        if re.match(rate_regex, schedule):
-            rate = re.sub(rate_regex, r"\1", schedule)
-            value, unit = re.split(r"\s+", rate.strip())
-
-            value = int(value)
-            if value < 1:
-                raise ValueError("Rate value must be larger than 0")
-            # see https://docs.aws.amazon.com/eventbridge/latest/userguide/eb-rate-expressions.html
-            if value == 1 and unit.endswith("s"):
-                raise ValueError("If the value is equal to 1, then the unit must be singular")
-            if value > 1 and not unit.endswith("s"):
-                raise ValueError("If the value is greater than 1, the unit must be plural")
-
-            if "minute" in unit:
-                return "*/%s * * * *" % value
-            if "hour" in unit:
-                return "0 */%s * * *" % value
-            if "day" in unit:
-                return "0 0 */%s * *" % value
-            raise ValueError("Unable to parse events schedule expression: %s" % schedule)
-        return schedule
-
-    @staticmethod
-    def put_rule_job_scheduler(
-        store: EventsStore,
-        name: Optional[RuleName],
-        state: Optional[RuleState],
-        schedule_expression: Optional[ScheduleExpression],
-        event_bus_name_or_arn: Optional[EventBusNameOrArn] = None,
-    ):
-        if not schedule_expression:
-            return
-
-        try:
-            cron = EventsProvider.convert_schedule_to_cron(schedule_expression)
-        except ValueError as e:
-            LOG.error("Error parsing schedule expression: %s", e)
-            raise ValidationException("Parameter ScheduleExpression is not valid.") from e
-
-        job_func = EventsProvider.get_scheduled_rule_func(
-            store, name, event_bus_name_or_arn=event_bus_name_or_arn
+    @handler("CreateEventBus")
+    def create_event_bus(
+        self,
+        context: RequestContext,
+        name: EventBusName,
+        event_source_name: EventSourceName = None,
+        description: EventBusDescription = None,
+        kms_key_identifier: KmsKeyIdentifier = None,
+        dead_letter_config: DeadLetterConfig = None,
+        tags: TagList = None,
+        **kwargs,
+    ) -> CreateEventBusResponse:
+        region = context.region
+        account_id = context.account_id
+        store = self.get_store(context)
+        if name in store.event_buses.keys():
+            raise ResourceAlreadyExistsException(f"Event bus {name} already exists.")
+        event_bus_service = self.create_event_bus_service(
+            name, region, account_id, event_source_name, tags
         )
-        LOG.debug("Adding new scheduled Events rule with cron schedule %s", cron)
+        store.event_buses[event_bus_service.event_bus.name] = event_bus_service.event_bus
 
-        enabled = state != "DISABLED"
-        job_id = JobScheduler.instance().add_job(job_func, cron, enabled)
-        rule_scheduled_jobs = store.rule_scheduled_jobs
-        rule_scheduled_jobs[name] = job_id
+        if tags:
+            self.tag_resource(context, event_bus_service.arn, tags)
 
+        response = CreateEventBusResponse(
+            EventBusArn=event_bus_service.arn,
+        )
+        return response
+
+    @handler("DeleteEventBus")
+    def delete_event_bus(self, context: RequestContext, name: EventBusName, **kwargs) -> None:
+        if name == "default":
+            raise ValidationException("Cannot delete event bus default.")
+        store = self.get_store(context)
+        try:
+            if event_bus := self.get_event_bus(name, store):
+                del self._event_bus_services_store[event_bus.arn]
+                if rules := event_bus.rules:
+                    self._delete_rule_services(rules)
+                del store.event_buses[name]
+                del store.TAGS[event_bus.arn]
+        except ResourceNotFoundException as error:
+            return error
+
+    @handler("DescribeEventBus")
+    def describe_event_bus(
+        self, context: RequestContext, name: EventBusNameOrArn = None, **kwargs
+    ) -> DescribeEventBusResponse:
+        name = self._extract_event_bus_name(name)
+        store = self.get_store(context)
+        event_bus = self.get_event_bus(name, store)
+
+        response = self._event_bus_dict_to_api_type_event_bus(event_bus)
+        return response
+
+    @handler("ListEventBuses")
+    def list_event_buses(
+        self,
+        context: RequestContext,
+        name_prefix: EventBusName = None,
+        next_token: NextToken = None,
+        limit: LimitMax100 = None,
+        **kwargs,
+    ) -> ListEventBusesResponse:
+        store = self.get_store(context)
+        event_buses = (
+            get_filtered_dict(name_prefix, store.event_buses) if name_prefix else store.event_buses
+        )
+        limited_event_buses, next_token = self._get_limited_dict_and_next_token(
+            event_buses, next_token, limit
+        )
+
+        response = ListEventBusesResponse(
+            EventBuses=self._event_bust_dict_to_api_type_list(limited_event_buses)
+        )
+        if next_token is not None:
+            response["NextToken"] = next_token
+        return response
+
+    #######
+    # Rules
+    #######
+    @handler("EnableRule")
+    def enable_rule(
+        self,
+        context: RequestContext,
+        name: RuleName,
+        event_bus_name: EventBusNameOrArn = None,
+        **kwargs,
+    ) -> None:
+        store = self.get_store(context)
+        event_bus_name = self._extract_event_bus_name(event_bus_name)
+        event_bus = self.get_event_bus(event_bus_name, store)
+        rule = self.get_rule(name, event_bus)
+        rule.state = RuleState.ENABLED
+
+    @handler("DeleteRule")
+    def delete_rule(
+        self,
+        context: RequestContext,
+        name: RuleName,
+        event_bus_name: EventBusNameOrArn = None,
+        force: Boolean = None,
+        **kwargs,
+    ) -> None:
+        store = self.get_store(context)
+        event_bus_name = self._extract_event_bus_name(event_bus_name)
+        event_bus = self.get_event_bus(event_bus_name, store)
+        try:
+            rule = self.get_rule(name, event_bus)
+            if rule.targets and not force:
+                raise ValidationException("Rule can't be deleted since it has targets.")
+            self._delete_rule_services(rule)
+            del event_bus.rules[name]
+            del store.TAGS[rule.arn]
+        except ResourceNotFoundException as error:
+            return error
+
+    @handler("DescribeRule")
+    def describe_rule(
+        self,
+        context: RequestContext,
+        name: RuleName,
+        event_bus_name: EventBusNameOrArn = None,
+        **kwargs,
+    ) -> DescribeRuleResponse:
+        store = self.get_store(context)
+        event_bus_name = self._extract_event_bus_name(event_bus_name)
+        event_bus = self.get_event_bus(event_bus_name, store)
+        rule = self.get_rule(name, event_bus)
+
+        response = self._rule_dict_to_api_type_rule(rule)
+        return response
+
+    @handler("DisableRule")
+    def disable_rule(
+        self,
+        context: RequestContext,
+        name: RuleName,
+        event_bus_name: EventBusNameOrArn = None,
+        **kwargs,
+    ) -> None:
+        store = self.get_store(context)
+        event_bus_name = self._extract_event_bus_name(event_bus_name)
+        event_bus = self.get_event_bus(event_bus_name, store)
+        rule = self.get_rule(name, event_bus)
+        rule.state = RuleState.DISABLED
+
+    @handler("ListRules")
+    def list_rules(
+        self,
+        context: RequestContext,
+        name_prefix: RuleName = None,
+        event_bus_name: EventBusNameOrArn = None,
+        next_token: NextToken = None,
+        limit: LimitMax100 = None,
+        **kwargs,
+    ) -> ListRulesResponse:
+        store = self.get_store(context)
+        event_bus_name = self._extract_event_bus_name(event_bus_name)
+        event_bus = self.get_event_bus(event_bus_name, store)
+        rules = get_filtered_dict(name_prefix, event_bus.rules) if name_prefix else event_bus.rules
+        limited_rules, next_token = self._get_limited_dict_and_next_token(rules, next_token, limit)
+
+        response = ListRulesResponse(Rules=list(self._rule_dict_to_api_type_list(limited_rules)))
+        if next_token is not None:
+            response["NextToken"] = next_token
+        return response
+
+    @handler("ListRuleNamesByTarget")
+    def list_rule_names_by_target(
+        self,
+        context: RequestContext,
+        target_arn: TargetArn,
+        event_bus_name: EventBusNameOrArn = None,
+        next_token: NextToken = None,
+        limit: LimitMax100 = None,
+        **kwargs,
+    ) -> ListRuleNamesByTargetResponse:
+        raise NotImplementedError
+
+    @handler("PutRule")
     def put_rule(
         self,
         context: RequestContext,
@@ -258,73 +394,77 @@ class EventsProvider(EventsApi, ServiceLifecycleHook):
         event_bus_name: EventBusNameOrArn = None,
         **kwargs,
     ) -> PutRuleResponse:
+        region = context.region
+        account_id = context.account_id
+        event_bus_name = self._extract_event_bus_name(event_bus_name)
         store = self.get_store(context)
-        self.put_rule_job_scheduler(
-            store, name, state, schedule_expression, event_bus_name_or_arn=event_bus_name
+        event_bus = self.get_event_bus(event_bus_name, store)
+        existing_rule = event_bus.rules.get(name)
+        targets = existing_rule.targets if existing_rule else None
+        rule_service = self.create_rule_service(
+            name,
+            region,
+            account_id,
+            schedule_expression,
+            event_pattern,
+            state,
+            description,
+            role_arn,
+            tags,
+            event_bus_name,
+            targets,
         )
-        return call_moto(context)
+        event_bus.rules[name] = rule_service.rule
 
-    def delete_rule(
+        if tags:
+            self.tag_resource(context, rule_service.arn, tags)
+
+        response = PutRuleResponse(RuleArn=rule_service.arn)
+        return response
+
+    @handler("TestEventPattern")
+    def test_event_pattern(
+        self, context: RequestContext, event_pattern: EventPattern, event: str, **kwargs
+    ) -> TestEventPatternResponse:
+        """Test event pattern uses EventBridge event pattern matching:
+        https://docs.aws.amazon.com/eventbridge/latest/userguide/eb-event-patterns.html
+        """
+        try:
+            result = matches_rule(event, event_pattern)
+        except InternalInvalidEventPatternException as e:
+            raise InvalidEventPatternException(e.message) from e
+
+        return TestEventPatternResponse(Result=result)
+
+    #########
+    # Targets
+    #########
+
+    @handler("ListTargetsByRule")
+    def list_targets_by_rule(
         self,
         context: RequestContext,
-        name: RuleName,
+        rule: RuleName,
         event_bus_name: EventBusNameOrArn = None,
-        force: Boolean = None,
+        next_token: NextToken = None,
+        limit: LimitMax100 = None,
         **kwargs,
-    ) -> None:
-        rule_scheduled_jobs = self.get_store(context).rule_scheduled_jobs
-        job_id = rule_scheduled_jobs.get(name)
-        if job_id:
-            LOG.debug("Removing scheduled Events: {} | job_id: {}".format(name, job_id))
-            JobScheduler.instance().cancel_job(job_id=job_id)
-        call_moto(context)
+    ) -> ListTargetsByRuleResponse:
+        store = self.get_store(context)
+        event_bus_name = self._extract_event_bus_name(event_bus_name)
+        event_bus = self.get_event_bus(event_bus_name, store)
+        rule = self.get_rule(rule, event_bus)
+        targets = rule.targets
+        limited_targets, next_token = self._get_limited_dict_and_next_token(
+            targets, next_token, limit
+        )
 
-    def disable_rule(
-        self,
-        context: RequestContext,
-        name: RuleName,
-        event_bus_name: EventBusNameOrArn = None,
-        **kwargs,
-    ) -> None:
-        rule_scheduled_jobs = self.get_store(context).rule_scheduled_jobs
-        job_id = rule_scheduled_jobs.get(name)
-        if job_id:
-            LOG.debug("Disabling Rule: {} | job_id: {}".format(name, job_id))
-            JobScheduler.instance().disable_job(job_id=job_id)
-        call_moto(context)
+        response = ListTargetsByRuleResponse(Targets=list(limited_targets.values()))
+        if next_token is not None:
+            response["NextToken"] = next_token
+        return response
 
-    def create_connection(
-        self,
-        context: RequestContext,
-        name: ConnectionName,
-        authorization_type: ConnectionAuthorizationType,
-        auth_parameters: CreateConnectionAuthRequestParameters,
-        description: ConnectionDescription = None,
-        **kwargs,
-    ) -> CreateConnectionResponse:
-        errors = []
-
-        if not CONNECTION_NAME_PATTERN.match(name):
-            error = f"{name} at 'name' failed to satisfy: Member must satisfy regular expression pattern: [\\.\\-_A-Za-z0-9]+"
-            errors.append(error)
-
-        if len(name) > 64:
-            error = f"{name} at 'name' failed to satisfy: Member must have length less than or equal to 64"
-            errors.append(error)
-
-        if authorization_type not in ["BASIC", "API_KEY", "OAUTH_CLIENT_CREDENTIALS"]:
-            error = f"{authorization_type} at 'authorizationType' failed to satisfy: Member must satisfy enum value set: [BASIC, OAUTH_CLIENT_CREDENTIALS, API_KEY]"
-            errors.append(error)
-
-        if len(errors) > 0:
-            error_description = "; ".join(errors)
-            error_plural = "errors" if len(errors) > 1 else "error"
-            errors_amount = len(errors)
-            message = f"{errors_amount} validation {error_plural} detected: {error_description}"
-            raise CommonServiceException(message=message, code="ValidationException")
-
-        return call_moto(context)
-
+    @handler("PutTargets")
     def put_targets(
         self,
         context: RequestContext,
@@ -333,396 +473,376 @@ class EventsProvider(EventsApi, ServiceLifecycleHook):
         event_bus_name: EventBusNameOrArn = None,
         **kwargs,
     ) -> PutTargetsResponse:
-        validation_errors = []
+        region = context.region
+        account_id = context.account_id
+        rule_service = self.get_rule_service(context, rule, event_bus_name)
+        failed_entries = rule_service.add_targets(targets)
+        rule_arn = rule_service.arn
+        rule_name = rule_service.rule.name
+        for target in targets:  # TODO only add successful targets
+            self.create_target_sender(target, region, account_id, rule_arn, rule_name)
 
-        id_regex = re.compile(r"^[\.\-_A-Za-z0-9]+$")
-        for index, target in enumerate(targets):
-            id = target.get("Id")
-            if not id_regex.match(id):
-                validation_errors.append(
-                    f"Value '{id}' at 'targets.{index + 1}.member.id' failed to satisfy constraint: Member must satisfy regular expression pattern: [\\.\\-_A-Za-z0-9]+"
-                )
-
-            if len(id) > 64:
-                validation_errors.append(
-                    f"Value '{id}' at 'targets.{index + 1}.member.id' failed to satisfy constraint: Member must have length less than or equal to 64"
-                )
-
-        if validation_errors:
-            errors_message = "; ".join(validation_errors)
-            message = f"{len(validation_errors)} validation {'errors' if len(validation_errors) > 1 else 'error'} detected: {errors_message}"
-            raise CommonServiceException(message=message, code="ValidationException")
-
-        return call_moto(context)
-
-
-def _get_events_tmp_dir():
-    return os.path.join(config.dirs.tmp, EVENTS_TMP_DIR)
-
-
-def _create_and_register_temp_dir():
-    tmp_dir = _get_events_tmp_dir()
-    if not os.path.exists(tmp_dir):
-        mkdir(tmp_dir)
-        TMP_FILES.append(tmp_dir)
-    return tmp_dir
-
-
-def _dump_events_to_files(events_with_added_uuid):
-    try:
-        _create_and_register_temp_dir()
-        current_time_millis = int(round(time.time() * 1000))
-        for event in events_with_added_uuid:
-            target = os.path.join(
-                _get_events_tmp_dir(),
-                "%s_%s" % (current_time_millis, event["uuid"]),
+        if rule_service.schedule_cron:
+            schedule_job_function = self._get_scheduled_rule_job_function(
+                account_id, region, rule_service.rule
             )
-            save_file(target, json.dumps(event["event"]))
-    except Exception as e:
-        LOG.info("Unable to dump events to tmp dir %s: %s", _get_events_tmp_dir(), e)
+            rule_service.create_schedule_job(schedule_job_function)
+        response = PutTargetsResponse(
+            FailedEntryCount=len(failed_entries), FailedEntries=failed_entries
+        )
+        return response
 
+    @handler("RemoveTargets")
+    def remove_targets(
+        self,
+        context: RequestContext,
+        rule: RuleName,
+        ids: TargetIdList,
+        event_bus_name: EventBusNameOrArn = None,
+        force: Boolean = None,
+        **kwargs,
+    ) -> RemoveTargetsResponse:
+        rule_service = self.get_rule_service(context, rule, event_bus_name)
+        failed_entries = rule_service.remove_targets(ids)
+        self._delete_target_sender(ids, rule_service.rule)
 
-def handle_numeric_conditions(conditions: list[Any], value: float):
-    for i in range(0, len(conditions), 2):
-        if conditions[i] == "<" and not (value < conditions[i + 1]):
-            return False
-        if conditions[i] == ">" and not (value > conditions[i + 1]):
-            return False
-        if conditions[i] == "<=" and not (value <= conditions[i + 1]):
-            return False
-        if conditions[i] == ">=" and not (value >= conditions[i + 1]):
-            return False
-    return True
+        response = RemoveTargetsResponse(
+            FailedEntryCount=len(failed_entries), FailedEntries=failed_entries
+        )
+        return response
 
+    ########
+    # Events
+    ########
 
-def check_valid_numeric_content_base_rule(list_of_operators):
-    if len(list_of_operators) > 4:
-        return False
+    @handler("PutEvents")
+    def put_events(
+        self,
+        context: RequestContext,
+        entries: PutEventsRequestEntryList,
+        endpoint_id: EndpointId = None,
+        **kwargs,
+    ) -> PutEventsResponse:
+        entries, failed_entry_count = self._process_entries(context, entries)
 
-    if "=" in list_of_operators:
-        return False
+        response = PutEventsResponse(
+            Entries=entries,
+            FailedEntryCount=failed_entry_count,
+        )
+        return response
 
-    if len(list_of_operators) > 2:
-        upper_limit = None
-        lower_limit = None
-        for index in range(len(list_of_operators)):
-            if not isinstance(list_of_operators[index], int) and "<" in list_of_operators[index]:
-                upper_limit = list_of_operators[index + 1]
-            if not isinstance(list_of_operators[index], int) and ">" in list_of_operators[index]:
-                lower_limit = list_of_operators[index + 1]
-            if upper_limit and lower_limit and upper_limit < lower_limit:
-                return False
-            index = index + 1
-    return True
+    @handler("PutPartnerEvents")
+    def put_partner_events(
+        self, context: RequestContext, entries: PutPartnerEventsRequestEntryList, **kwargs
+    ) -> PutPartnerEventsResponse:
+        raise NotImplementedError
 
+    ######
+    # Tags
+    ######
 
-def filter_event_with_content_base_parameter(pattern_value: list, event_value: str | int):
-    for element in pattern_value:
-        if (isinstance(element, (str, int))) and (event_value == element or element in event_value):
-            return True
-        elif isinstance(element, dict):
-            element_key = list(element.keys())[0]
-            element_value = element.get(element_key)
-            if element_key.lower() == "prefix":
-                if isinstance(event_value, str) and event_value.startswith(element_value):
-                    return True
-            elif element_key.lower() == "exists":
-                if element_value and event_value:
-                    return True
-                elif not element_value and isinstance(event_value, object):
-                    return True
-            elif element_key.lower() == "cidr":
-                ips = [str(ip) for ip in ipaddress.IPv4Network(element_value)]
-                if event_value in ips:
-                    return True
-            elif element_key.lower() == "numeric":
-                if check_valid_numeric_content_base_rule(element_value):
-                    for index in range(len(element_value)):
-                        if isinstance(element_value[index], int):
-                            continue
-                        if (
-                            element_value[index] == ">"
-                            and isinstance(element_value[index + 1], int)
-                            and event_value <= element_value[index + 1]
-                        ):
-                            break
-                        elif (
-                            element_value[index] == ">="
-                            and isinstance(element_value[index + 1], int)
-                            and event_value < element_value[index + 1]
-                        ):
-                            break
-                        elif (
-                            element_value[index] == "<"
-                            and isinstance(element_value[index + 1], int)
-                            and event_value >= element_value[index + 1]
-                        ):
-                            break
-                        elif (
-                            element_value[index] == "<="
-                            and isinstance(element_value[index + 1], int)
-                            and event_value > element_value[index + 1]
-                        ):
-                            break
-                    else:
-                        return True
+    @handler("ListTagsForResource")
+    def list_tags_for_resource(
+        self, context: RequestContext, resource_arn: Arn, **kwargs
+    ) -> ListTagsForResourceResponse:
+        store = self.get_store(context)
+        resource_type = get_resource_type(resource_arn)
+        self._check_resource_exists(resource_arn, resource_type, store)
+        tags = store.TAGS.list_tags_for_resource(resource_arn)
+        return ListTagsForResourceResponse(tags)
 
-            elif element_key.lower() == "anything-but":
-                if isinstance(element_value, list) and event_value not in element_value:
-                    return True
-                elif (isinstance(element_value, (str, int))) and event_value != element_value:
-                    return True
-                elif isinstance(element_value, dict):
-                    nested_key = list(element_value)[0]
-                    if nested_key == "prefix" and not re.match(
-                        r"^{}".format(element_value.get(nested_key)), event_value
-                    ):
-                        return True
-    return False
+    @handler("TagResource")
+    def tag_resource(
+        self, context: RequestContext, resource_arn: Arn, tags: TagList, **kwargs
+    ) -> TagResourceResponse:
+        # each tag key must be unique
+        # https://docs.aws.amazon.com/general/latest/gr/aws_tagging.html#tag-best-practices
+        store = self.get_store(context)
+        resource_type = get_resource_type(resource_arn)
+        self._check_resource_exists(resource_arn, resource_type, store)
+        check_unique_tags(tags)
+        store.TAGS.tag_resource(resource_arn, tags)
 
+    @handler("UntagResource")
+    def untag_resource(
+        self, context: RequestContext, resource_arn: Arn, tag_keys: TagKeyList, **kwargs
+    ) -> UntagResourceResponse:
+        store = self.get_store(context)
+        resource_type = get_resource_type(resource_arn)
+        self._check_resource_exists(resource_arn, resource_type, store)
+        store.TAGS.untag_resource(resource_arn, tag_keys)
 
-# TODO: unclear shared responsibility for filtering with filter_event_with_content_base_parameter
-def handle_prefix_filtering(event_pattern, value):
-    for element in event_pattern:
-        if isinstance(element, (int, str)):
-            if str(element) == str(value):
-                return True
-            if element in value:
-                return True
-        elif isinstance(element, dict) and "prefix" in element:
-            if value.startswith(element.get("prefix")):
-                return True
-        elif isinstance(element, dict) and "anything-but" in element:
-            if element.get("anything-but") != value:
-                return True
-        elif isinstance(element, dict) and "exists" in element:
-            if element.get("exists") and value:
-                return True
-        elif "numeric" in element:
-            return handle_numeric_conditions(element.get("numeric"), value)
-        elif isinstance(element, list):
-            if value in list:
-                return True
-    return False
+    #########
+    # Methods
+    #########
 
-
-def identify_content_base_parameter_in_pattern(parameters) -> bool:
-    return any(
-        list(param.keys())[0] in CONTENT_BASE_FILTER_KEYWORDS
-        for param in parameters
-        if isinstance(param, dict)
-    )
-
-
-def get_two_lists_intersection(lst1: List, lst2: List) -> List:
-    lst3 = [value for value in lst1 if value in lst2]
-    return lst3
-
-
-def event_pattern_prefix_bool_filter(event_pattern_filter_value_list: list[dict[str, Any]]) -> bool:
-    for event_pattern_filter_value in event_pattern_filter_value_list:
-        if "exists" in event_pattern_filter_value:
-            return event_pattern_filter_value.get("exists")
-        else:
-            return True
-
-
-# TODO: refactor/simplify!
-def filter_event_based_on_event_format(
-    self, rule_name: str, event_bus_name: str, event: dict[str, Any]
-):
-    def filter_event(event_pattern_filter: dict[str, Any], event: dict[str, Any]):
-        for key, value in event_pattern_filter.items():
-            fallback = object()
-            event_value = event.get(key.lower(), event.get(key, fallback))
-            if event_value is fallback and event_pattern_prefix_bool_filter(value):
-                return False
-
-            # 1. check if certain values in the event do not match the expected pattern
-            if event_value and isinstance(event_value, dict):
-                for key_a, value_a in event_value.items():
-                    if key_a == "ip":
-                        # TODO add IP-Address check here
-                        continue
-                    if isinstance(value.get(key_a), (int, str)):
-                        if value_a != value.get(key_a):
-                            return False
-                    if isinstance(value.get(key_a), list) and value_a not in value.get(key_a):
-                        if not handle_prefix_filtering(value.get(key_a), value_a):
-                            return False
-
-            # 2. check if the pattern is a list and event values are not contained in it
-            if isinstance(value, list):
-                if identify_content_base_parameter_in_pattern(value):
-                    if not filter_event_with_content_base_parameter(value, event_value):
-                        return False
-                else:
-                    if (
-                        isinstance(event_value, list)
-                        and get_two_lists_intersection(value, event_value) == []
-                    ):
-                        return False
-                    if (
-                        not isinstance(event_value, list)
-                        and isinstance(event_value, (str, int))
-                        and event_value not in value
-                    ):
-                        return False
-
-            # 3. recursively call filter_event(..) for dict types
-            elif isinstance(value, (str, dict)):
-                try:
-                    value = json.loads(value) if isinstance(value, str) else value
-                    if isinstance(value, dict) and not filter_event(value, event_value):
-                        return False
-                except json.decoder.JSONDecodeError:
-                    return False
-
-        return True
-
-    rule_information = self.events_backend.describe_rule(
-        rule_name, event_bus_arn(event_bus_name, self.current_account, self.region)
-    )
-
-    if not rule_information:
-        LOG.info('Unable to find rule "%s" in backend: %s', rule_name, rule_information)
-        return False
-    if rule_information.event_pattern._pattern:
-        event_pattern = rule_information.event_pattern._pattern
-        if not filter_event(event_pattern, event):
-            return False
-    return True
-
-
-def filter_event_with_target_input_path(target: Dict, event: Dict) -> Dict:
-    input_path = target.get("InputPath")
-    if input_path:
-        event = extract_jsonpath(event, input_path)
-    return event
-
-
-def process_event_with_input_transformer(input_transformer: Dict, event: Dict) -> Dict:
-    """
-    Process the event with the input transformer of the target event,
-    by replacing the message with the populated InputTemplate.
-    docs.aws.amazon.com/eventbridge/latest/userguide/eb-transform-target-input.html
-    """
-    try:
-        input_paths = input_transformer["InputPathsMap"]
-        input_template = input_transformer["InputTemplate"]
-    except KeyError as e:
-        LOG.error("%s key does not exist in input_transformer.", e)
-        raise e
-    for key, path in input_paths.items():
-        value = extract_jsonpath(event, path)
-        if not value:
-            value = ""
-        input_template = input_template.replace(f"<{key}>", value)
-    templated_event = re.sub('"', "", input_template)
-    return templated_event
-
-
-def process_events(event: Dict, targets: list[Dict]):
-    for target in targets:
-        arn = target["Arn"]
-        changed_event = filter_event_with_target_input_path(target, event)
-        if input_transformer := target.get("InputTransformer"):
-            changed_event = process_event_with_input_transformer(input_transformer, changed_event)
-        if target.get("Input"):
-            changed_event = json.loads(target.get("Input"))
-        try:
-            send_event_to_target(
-                arn,
-                changed_event,
-                pick_attributes(target, ["$.SqsParameters", "$.KinesisParameters"]),
-                role=target.get("RoleArn"),
-                target=target,
-                source_service=ServicePrincipal.events,
-                source_arn=target.get("RuleArn"),
+    def get_store(self, context: RequestContext) -> EventsStore:
+        """Returns the events store for the account and region.
+        On first call, creates the default event bus for the account region."""
+        region = context.region
+        account_id = context.account_id
+        store = events_store[account_id][region]
+        # create default event bus for account region on first call
+        default_event_bus_name = "default"
+        if default_event_bus_name not in store.event_buses.keys():
+            event_bus_service = self.create_event_bus_service(
+                default_event_bus_name, region, account_id, None, None
             )
-        except Exception as e:
-            LOG.info(f"Unable to send event notification {truncate(event)} to target {target}: {e}")
+            store.event_buses[event_bus_service.event_bus.name] = event_bus_service.event_bus
+        return store
 
+    def get_event_bus(self, name: EventBusName, store: EventsStore) -> EventBus:
+        if event_bus := store.event_buses.get(name):
+            return event_bus
+        raise ResourceNotFoundException(f"Event bus {name} does not exist.")
 
-def get_event_bus_name(event_bus_name_or_arn: Optional[EventBusNameOrArn] = None) -> str:
-    event_bus_name_or_arn = event_bus_name_or_arn or DEFAULT_EVENT_BUS_NAME
-    return event_bus_name_or_arn.split("/")[-1]
+    def get_rule(self, name: RuleName, event_bus: EventBus) -> Rule:
+        if rule := event_bus.rules.get(name):
+            return rule
+        raise ResourceNotFoundException(f"Rule {name} does not exist on EventBus {event_bus.name}.")
 
+    def get_target(self, target_id: TargetId, rule: Rule) -> Target:
+        if target := rule.targets.get(target_id):
+            return target
+        raise ResourceNotFoundException(f"Target {target_id} does not exist on Rule {rule.name}.")
 
-# specific logic for put_events which forwards matching events to target listeners
-def events_handler_put_events(self):
-    entries = self._get_param("Entries")
+    def get_rule_service(
+        self, context: RequestContext, rule_name: RuleName, event_bus_name: EventBusName
+    ) -> RuleService:
+        store = self.get_store(context)
+        event_bus_name = self._extract_event_bus_name(event_bus_name)
+        event_bus = self.get_event_bus(event_bus_name, store)
+        rule = self.get_rule(rule_name, event_bus)
+        return self._rule_services_store[rule.arn]
 
-    # keep track of events for local integration testing
-    if config.is_local_test_mode():
-        TEST_EVENTS_CACHE.extend(entries)
+    def create_event_bus_service(
+        self,
+        name: EventBusName,
+        region: str,
+        account_id: str,
+        event_source_name: Optional[EventSourceName],
+        tags: Optional[TagList],
+    ) -> EventBusService:
+        event_bus_service = EventBusService(
+            name,
+            region,
+            account_id,
+            event_source_name,
+            tags,
+        )
+        self._event_bus_services_store[event_bus_service.arn] = event_bus_service
+        return event_bus_service
 
-    events = [{"event": event, "uuid": str(long_uid())} for event in entries]
+    def create_rule_service(
+        self,
+        name: RuleName,
+        region: str,
+        account_id: str,
+        schedule_expression: Optional[ScheduleExpression],
+        event_pattern: Optional[EventPattern],
+        state: Optional[RuleState],
+        description: Optional[RuleDescription],
+        role_arn: Optional[RoleArn],
+        tags: Optional[TagList],
+        event_bus_name: Optional[EventBusName],
+        targets: Optional[TargetDict],
+    ) -> RuleService:
+        rule_service = RuleService(
+            name,
+            region,
+            account_id,
+            schedule_expression,
+            event_pattern,
+            state,
+            description,
+            role_arn,
+            tags,
+            event_bus_name,
+            targets,
+        )
+        self._rule_services_store[rule_service.arn] = rule_service
+        return rule_service
 
-    _dump_events_to_files(events)
+    def create_target_sender(
+        self, target: Target, region: str, account_id: str, rule_arn: Arn, rule_name: RuleName
+    ) -> TargetSender:
+        target_sender = TargetSenderFactory(
+            target, region, account_id, rule_arn, rule_name
+        ).get_target_sender()
+        self._target_sender_store[target_sender.arn] = target_sender
+        return target_sender
 
-    for event_envelope in events:
-        event = event_envelope["event"]
-        event_bus_name = get_event_bus_name(event.get("EventBusName"))
-        event_bus = self.events_backend.event_buses.get(event_bus_name)
-        if not event_bus:
-            continue
+    def _get_limited_dict_and_next_token(
+        self, input_dict: dict, next_token: NextToken | None, limit: LimitMax100 | None
+    ) -> tuple[dict, NextToken]:
+        """Return a slice of the given dictionary starting from next_token with length of limit
+        and new last index encoded as a next_token for pagination."""
+        input_dict_len = len(input_dict)
+        start_index = decode_next_token(next_token) if next_token is not None else 0
+        end_index = start_index + limit if limit is not None else input_dict_len
+        limited_dict = dict(list(input_dict.items())[start_index:end_index])
 
-        matching_rules = [
-            r
-            for r in event_bus.rules.values()
-            if r.event_bus_name == event_bus_name and not r.scheduled_expression
+        next_token = (
+            encode_next_token(end_index)
+            # return a next_token (encoded integer of next starting index) if not all items are returned
+            if end_index < input_dict_len
+            else None
+        )
+        return limited_dict, next_token
+
+    def _extract_event_bus_name(
+        self, resource_arn_or_name: EventBusNameOrArn | RuleArn | None
+    ) -> EventBusName:
+        """Return the event bus name. Input can be either an event bus name or ARN."""
+        if not resource_arn_or_name:
+            return "default"
+        if "arn:aws:events" not in resource_arn_or_name:
+            return resource_arn_or_name
+        resource_type = get_resource_type(resource_arn_or_name)
+        # TODO how to deal with / in event bus name or rule name
+        if resource_type == ResourceType.EVENT_BUS:
+            return resource_arn_or_name.split("/")[-1]
+        if resource_type == ResourceType.RULE:
+            if bool(RULE_ARN_CUSTOM_EVENT_BUS_PATTERN.match(resource_arn_or_name)):
+                return resource_arn_or_name.split("rule/", 1)[1].split("/", 1)[0]
+            return "default"
+
+    def _event_bust_dict_to_api_type_list(self, event_buses: EventBusDict) -> EventBusList:
+        """Return a converted dict of EventBus model objects as a list of event buses in API type EventBus format."""
+        event_bus_list = [
+            self._event_bus_dict_to_api_type_event_bus(event_bus)
+            for event_bus in event_buses.values()
         ]
-        if not matching_rules:
-            continue
+        return event_bus_list
 
-        event_time = datetime.datetime.utcnow()
-        if event_timestamp := event.get("Time"):
-            try:
-                # if provided, use the time from event
-                event_time = datetime.datetime.utcfromtimestamp(event_timestamp)
-            except ValueError:
-                # if we can't parse it, pass and keep using `utcnow`
-                LOG.debug(
-                    "Could not parse the `Time` parameter, falling back to `utcnow` for the following Event: '%s'",
-                    event,
-                )
-
-        # See https://docs.aws.amazon.com/AmazonS3/latest/userguide/ev-events.html
-        formatted_event = {
-            "version": "0",
-            "id": event_envelope["uuid"],
-            "detail-type": event.get("DetailType"),
-            "source": event.get("Source"),
-            "account": self.current_account,
-            "time": event_time.strftime("%Y-%m-%dT%H:%M:%SZ"),
-            "region": self.region,
-            "resources": event.get("Resources", []),
-            "detail": json.loads(event.get("Detail", "{}")),
+    def _event_bus_dict_to_api_type_event_bus(self, event_bus: EventBus) -> ApiTypeEventBus:
+        event_bus_api_type = {
+            "Name": event_bus.name,
+            "Arn": event_bus.arn,
         }
+        if event_bus.policy:
+            event_bus_api_type["Policy"] = event_bus.policy
 
-        targets = []
-        for rule in matching_rules:
-            if filter_event_based_on_event_format(self, rule.name, event_bus_name, formatted_event):
-                rule_targets = self.events_backend.list_targets_by_rule(
-                    rule.name, event_bus_arn(event_bus_name, self.current_account, self.region)
-                ).get("Targets", [])
+        return event_bus_api_type
 
-                targets.extend([{"RuleArn": rule.arn} | target for target in rule_targets])
-        # process event
-        process_events(formatted_event, targets)
+    def _delete_rule_services(self, rules: RuleDict | Rule) -> None:
+        """
+        Delete all rule services associated to the input from the store.
+        Accepts a single Rule object or a dict of Rule objects as input.
+        """
+        if isinstance(rules, Rule):
+            rules = {rules.name: rules}
+        for rule in rules.values():
+            del self._rule_services_store[rule.arn]
 
-    content = {
-        "FailedEntryCount": 0,  # TODO: dynamically set proper value when refactoring
-        "Entries": [{"EventId": event["uuid"]} for event in events],
-    }
+    def _rule_dict_to_api_type_list(self, rules: RuleDict) -> RuleResponseList:
+        """Return a converted dict of Rule model objects as a list of rules in API type Rule format."""
+        rule_list = [self._rule_dict_to_api_type_rule(rule) for rule in rules.values()]
+        return rule_list
 
-    self.response_headers.update(
-        {"Content-Type": APPLICATION_AMZ_JSON_1_1, "x-amzn-RequestId": short_uid()}
-    )
+    def _rule_dict_to_api_type_rule(self, rule: Rule) -> ApiTypeRule:
+        rule = {
+            "Name": rule.name,
+            "Arn": rule.arn,
+            "EventPattern": rule.event_pattern,
+            "State": rule.state,
+            "Description": rule.description,
+            "ScheduleExpression": rule.schedule_expression,
+            "RoleArn": rule.role_arn,
+            "ManagedBy": rule.managed_by,
+            "EventBusName": rule.event_bus_name,
+            "CreatedBy": rule.created_by,
+        }
+        return {key: value for key, value in rule.items() if value is not None}
 
-    return json.dumps(content), self.response_headers
+    def _delete_target_sender(self, ids: TargetIdList, rule) -> None:
+        for target_id in ids:
+            if target := rule.targets.get(target_id):
+                target_arn = target["Arn"]
+                try:
+                    del self._target_sender_store[target_arn]
+                except KeyError:
+                    LOG.error(f"Error deleting target service {target_arn}.")
 
+    def _check_resource_exists(
+        self, resource_arn: Arn, resource_type: ResourceType, store: EventsStore
+    ) -> None:
+        if resource_type == ResourceType.EVENT_BUS:
+            event_bus_name = self._extract_event_bus_name(resource_arn)
+            self.get_event_bus(event_bus_name, store)
+        if resource_type == ResourceType.RULE:
+            event_bus_name = self._extract_event_bus_name(resource_arn)
+            event_bus = self.get_event_bus(event_bus_name, store)
+            rule_name = resource_arn.split("/")[-1]
+            self.get_rule(rule_name, event_bus)
 
-def apply_patches():
-    MotoEventsHandler.put_events = events_handler_put_events
+    def _process_entries(
+        self, context: RequestContext, entries: PutEventsRequestEntryList
+    ) -> tuple[PutEventsResultEntryList, int]:
+        processed_entries = []
+        failed_entry_count = 0
+        for event in entries:
+            event_bus_name = event.get("EventBusName", "default")
+            if event_failed_validation := validate_event(event):
+                processed_entries.append(event_failed_validation)
+                failed_entry_count += 1
+                continue
+            event = format_event(event, context.region, context.account_id)
+            store = self.get_store(context)
+            try:
+                event_bus = self.get_event_bus(event_bus_name, store)
+            except ResourceNotFoundException:
+                # ignore events for non-existing event buses but add processed event
+                processed_entries.append({"EventId": event["id"]})
+                continue
+            matching_rules = [rule for rule in event_bus.rules.values()]
+            for rule in matching_rules:
+                event_pattern = rule.event_pattern
+                event_str = json.dumps(event)
+                if matches_rule(event_str, event_pattern):
+                    for target in rule.targets.values():
+                        target_sender = self._target_sender_store[target["Arn"]]
+                        try:
+                            target_sender.process_event(event)
+                            processed_entries.append({"EventId": event["id"]})
+                        except Exception as error:
+                            processed_entries.append(
+                                {
+                                    "ErrorCode": "InternalException",
+                                    "ErrorMessage": str(error),
+                                }
+                            )
+                            failed_entry_count += 1
+        return processed_entries, failed_entry_count
+
+    def _get_scheduled_rule_job_function(self, account_id, region, rule: Rule) -> Callable:
+        def func(*args, **kwargs):
+            """Create custom scheduled event and send it to all targets specified by associated rule using respective TargetSender"""
+            for target in rule.targets.values():
+                if custom_input := target.get("Input"):
+                    event = json.loads(custom_input)
+                else:
+                    event = {
+                        "version": "0",
+                        "id": long_uid(),
+                        "detail-type": "Scheduled Event",
+                        "source": "aws.events",
+                        "account": account_id,
+                        "time": timestamp(format=TIMESTAMP_FORMAT_TZ),
+                        "region": region,
+                        "resources": [rule.arn],
+                        "detail": {},
+                    }
+
+                target_sender = self._target_sender_store[target["Arn"]]
+                try:
+                    target_sender.process_event(event)
+                except Exception as e:
+                    LOG.info(
+                        "Unable to send event notification %s to target %s: %s",
+                        truncate(event),
+                        target,
+                        e,
+                    )
+
+        return func

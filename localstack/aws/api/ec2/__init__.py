@@ -1,7 +1,14 @@
 from datetime import datetime
 from typing import List, Optional, TypedDict
 
-from localstack.aws.api import RequestContext, ServiceRequest, handler
+from localstack.aws.api import (
+    RequestContext,
+    ServiceRequest,
+    handler,
+)
+from localstack.aws.api import (
+    ServiceException as ServiceException,
+)
 
 AddressMaxResults = int
 AllocationId = str
@@ -17,6 +24,7 @@ BaselineIops = int
 BaselineThroughputInMBps = float
 Boolean = bool
 BoxedDouble = float
+BoxedInteger = int
 BundleId = str
 BurstablePerformanceFlag = bool
 CancelCapacityReservationFleetErrorCode = str
@@ -113,6 +121,7 @@ DrainSeconds = int
 EfaSupportedFlag = bool
 EgressOnlyInternetGatewayId = str
 EipAllocationPublicIp = str
+EkPubKeyValue = str
 ElasticGpuId = str
 ElasticInferenceAcceleratorCount = int
 ElasticIpAssociationId = str
@@ -749,6 +758,18 @@ class DatafeedSubscriptionState(str):
     Inactive = "Inactive"
 
 
+class DefaultInstanceMetadataEndpointState(str):
+    disabled = "disabled"
+    enabled = "enabled"
+    no_preference = "no-preference"
+
+
+class DefaultInstanceMetadataTagsState(str):
+    disabled = "disabled"
+    enabled = "enabled"
+    no_preference = "no-preference"
+
+
 class DefaultRouteTableAssociationValue(str):
     enable = "enable"
     disable = "disable"
@@ -857,6 +878,16 @@ class Ec2InstanceConnectEndpointState(str):
     delete_in_progress = "delete-in-progress"
     delete_complete = "delete-complete"
     delete_failed = "delete-failed"
+
+
+class EkPubKeyFormat(str):
+    der = "der"
+    tpmt = "tpmt"
+
+
+class EkPubKeyType(str):
+    rsa_2048 = "rsa-2048"
+    ecc_sec_p384 = "ecc-sec-p384"
 
 
 class ElasticGpuState(str):
@@ -1089,6 +1120,7 @@ class ImageAttributeName(str):
     uefiData = "uefiData"
     lastLaunchedTime = "lastLaunchedTime"
     imdsSupport = "imdsSupport"
+    deregistrationProtection = "deregistrationProtection"
 
 
 class ImageBlockPublicAccessDisabledState(str):
@@ -2006,6 +2038,19 @@ class InstanceType(str):
     r7i_metal_48xl = "r7i.metal-48xl"
     r7iz_metal_16xl = "r7iz.metal-16xl"
     r7iz_metal_32xl = "r7iz.metal-32xl"
+    c7gd_metal = "c7gd.metal"
+    m7gd_metal = "m7gd.metal"
+    r7gd_metal = "r7gd.metal"
+    g6_xlarge = "g6.xlarge"
+    g6_2xlarge = "g6.2xlarge"
+    g6_4xlarge = "g6.4xlarge"
+    g6_8xlarge = "g6.8xlarge"
+    g6_12xlarge = "g6.12xlarge"
+    g6_16xlarge = "g6.16xlarge"
+    g6_24xlarge = "g6.24xlarge"
+    g6_48xlarge = "g6.48xlarge"
+    gr6_4xlarge = "gr6.4xlarge"
+    gr6_8xlarge = "gr6.8xlarge"
 
 
 class InstanceTypeHypervisor(str):
@@ -2352,6 +2397,12 @@ class MembershipType(str):
     igmp = "igmp"
 
 
+class MetadataDefaultHttpTokensState(str):
+    optional = "optional"
+    required = "required"
+    no_preference = "no-preference"
+
+
 class MetricType(str):
     aggregate_latency = "aggregate-latency"
 
@@ -2400,6 +2451,7 @@ class NetworkInterfaceAttribute(str):
     groupSet = "groupSet"
     sourceDestCheck = "sourceDestCheck"
     attachment = "attachment"
+    associatePublicIpAddress = "associatePublicIpAddress"
 
 
 class NetworkInterfaceCreationType(str):
@@ -2505,6 +2557,11 @@ class PeriodType(str):
 
 class PermissionGroup(str):
     all = "all"
+
+
+class PhcSupport(str):
+    unsupported = "unsupported"
+    supported = "supported"
 
 
 class PlacementGroupState(str):
@@ -10933,6 +10990,8 @@ class Image(TypedDict, total=False):
     DeprecationTime: Optional[String]
     ImdsSupport: Optional[ImdsSupportValues]
     SourceInstanceId: Optional[String]
+    DeregistrationProtection: Optional[String]
+    LastLaunchedTime: Optional[String]
 
 
 ImageList = List[Image]
@@ -11487,6 +11546,7 @@ class InstanceTypeInfo(TypedDict, total=False):
     NitroTpmInfo: Optional[NitroTpmInfo]
     MediaAcceleratorInfo: Optional[MediaAcceleratorInfo]
     NeuronInfo: Optional[NeuronInfo]
+    PhcSupport: Optional[PhcSupport]
 
 
 InstanceTypeInfoList = List[InstanceTypeInfo]
@@ -12355,6 +12415,7 @@ class DescribeNetworkInterfaceAttributeResult(TypedDict, total=False):
     Groups: Optional[GroupIdentifierList]
     NetworkInterfaceId: Optional[String]
     SourceDestCheck: Optional[AttributeBooleanValue]
+    AssociatePublicIpAddress: Optional[Boolean]
 
 
 NetworkInterfacePermissionIdList = List[NetworkInterfacePermissionId]
@@ -14389,6 +14450,15 @@ class DisableImageDeprecationResult(TypedDict, total=False):
     Return: Optional[Boolean]
 
 
+class DisableImageDeregistrationProtectionRequest(ServiceRequest):
+    ImageId: ImageId
+    DryRun: Optional[Boolean]
+
+
+class DisableImageDeregistrationProtectionResult(TypedDict, total=False):
+    Return: Optional[String]
+
+
 class DisableImageRequest(ServiceRequest):
     ImageId: ImageId
     DryRun: Optional[Boolean]
@@ -14786,6 +14856,16 @@ class EnableImageDeprecationResult(TypedDict, total=False):
     Return: Optional[Boolean]
 
 
+class EnableImageDeregistrationProtectionRequest(ServiceRequest):
+    ImageId: ImageId
+    WithCooldown: Optional[Boolean]
+    DryRun: Optional[Boolean]
+
+
+class EnableImageDeregistrationProtectionResult(TypedDict, total=False):
+    Return: Optional[String]
+
+
 class EnableImageRequest(ServiceRequest):
     ImageId: ImageId
     DryRun: Optional[Boolean]
@@ -15130,6 +15210,35 @@ class GetImageBlockPublicAccessStateRequest(ServiceRequest):
 
 class GetImageBlockPublicAccessStateResult(TypedDict, total=False):
     ImageBlockPublicAccessState: Optional[String]
+
+
+class GetInstanceMetadataDefaultsRequest(ServiceRequest):
+    DryRun: Optional[Boolean]
+
+
+class InstanceMetadataDefaultsResponse(TypedDict, total=False):
+    HttpTokens: Optional[HttpTokensState]
+    HttpPutResponseHopLimit: Optional[BoxedInteger]
+    HttpEndpoint: Optional[InstanceMetadataEndpointState]
+    InstanceMetadataTags: Optional[InstanceMetadataTagsState]
+
+
+class GetInstanceMetadataDefaultsResult(TypedDict, total=False):
+    AccountLevel: Optional[InstanceMetadataDefaultsResponse]
+
+
+class GetInstanceTpmEkPubRequest(ServiceRequest):
+    InstanceId: InstanceId
+    KeyType: EkPubKeyType
+    KeyFormat: EkPubKeyFormat
+    DryRun: Optional[Boolean]
+
+
+class GetInstanceTpmEkPubResult(TypedDict, total=False):
+    InstanceId: Optional[InstanceId]
+    KeyType: Optional[EkPubKeyType]
+    KeyFormat: Optional[EkPubKeyFormat]
+    KeyValue: Optional[EkPubKeyValue]
 
 
 VirtualizationTypeSet = List[VirtualizationType]
@@ -15874,6 +15983,7 @@ class ImageAttribute(TypedDict, total=False):
     UefiData: Optional[AttributeValue]
     LastLaunchedTime: Optional[AttributeValue]
     ImdsSupport: Optional[AttributeValue]
+    DeregistrationProtection: Optional[AttributeValue]
 
 
 class UserBucket(TypedDict, total=False):
@@ -16488,6 +16598,18 @@ class ModifyInstanceMaintenanceOptionsResult(TypedDict, total=False):
     AutoRecovery: Optional[InstanceAutoRecoveryState]
 
 
+class ModifyInstanceMetadataDefaultsRequest(ServiceRequest):
+    HttpTokens: Optional[MetadataDefaultHttpTokensState]
+    HttpPutResponseHopLimit: Optional[BoxedInteger]
+    HttpEndpoint: Optional[DefaultInstanceMetadataEndpointState]
+    InstanceMetadataTags: Optional[DefaultInstanceMetadataTagsState]
+    DryRun: Optional[Boolean]
+
+
+class ModifyInstanceMetadataDefaultsResult(TypedDict, total=False):
+    Return: Optional[Boolean]
+
+
 class ModifyInstanceMetadataOptionsRequest(ServiceRequest):
     InstanceId: InstanceId
     HttpTokens: Optional[HttpTokensState]
@@ -16652,6 +16774,7 @@ class ModifyNetworkInterfaceAttributeRequest(ServiceRequest):
     EnaSrdSpecification: Optional[EnaSrdSpecification]
     EnablePrimaryIpv6: Optional[Boolean]
     ConnectionTrackingSpecification: Optional[ConnectionTrackingSpecificationRequest]
+    AssociatePublicIpAddress: Optional[Boolean]
 
 
 class ModifyPrivateDnsNameOptionsRequest(ServiceRequest):
@@ -22905,6 +23028,12 @@ class Ec2Api:
     ) -> DisableImageDeprecationResult:
         raise NotImplementedError
 
+    @handler("DisableImageDeregistrationProtection")
+    def disable_image_deregistration_protection(
+        self, context: RequestContext, image_id: ImageId, dry_run: Boolean = None, **kwargs
+    ) -> DisableImageDeregistrationProtectionResult:
+        raise NotImplementedError
+
     @handler("DisableIpamOrganizationAdminAccount")
     def disable_ipam_organization_admin_account(
         self,
@@ -23189,6 +23318,17 @@ class Ec2Api:
     ) -> EnableImageDeprecationResult:
         raise NotImplementedError
 
+    @handler("EnableImageDeregistrationProtection")
+    def enable_image_deregistration_protection(
+        self,
+        context: RequestContext,
+        image_id: ImageId,
+        with_cooldown: Boolean = None,
+        dry_run: Boolean = None,
+        **kwargs,
+    ) -> EnableImageDeregistrationProtectionResult:
+        raise NotImplementedError
+
     @handler("EnableIpamOrganizationAdminAccount")
     def enable_ipam_organization_admin_account(
         self,
@@ -23453,6 +23593,24 @@ class Ec2Api:
     def get_image_block_public_access_state(
         self, context: RequestContext, dry_run: Boolean = None, **kwargs
     ) -> GetImageBlockPublicAccessStateResult:
+        raise NotImplementedError
+
+    @handler("GetInstanceMetadataDefaults")
+    def get_instance_metadata_defaults(
+        self, context: RequestContext, dry_run: Boolean = None, **kwargs
+    ) -> GetInstanceMetadataDefaultsResult:
+        raise NotImplementedError
+
+    @handler("GetInstanceTpmEkPub")
+    def get_instance_tpm_ek_pub(
+        self,
+        context: RequestContext,
+        instance_id: InstanceId,
+        key_type: EkPubKeyType,
+        key_format: EkPubKeyFormat,
+        dry_run: Boolean = None,
+        **kwargs,
+    ) -> GetInstanceTpmEkPubResult:
         raise NotImplementedError
 
     @handler("GetInstanceTypesFromInstanceRequirements")
@@ -24224,6 +24382,19 @@ class Ec2Api:
     ) -> ModifyInstanceMaintenanceOptionsResult:
         raise NotImplementedError
 
+    @handler("ModifyInstanceMetadataDefaults")
+    def modify_instance_metadata_defaults(
+        self,
+        context: RequestContext,
+        http_tokens: MetadataDefaultHttpTokensState = None,
+        http_put_response_hop_limit: BoxedInteger = None,
+        http_endpoint: DefaultInstanceMetadataEndpointState = None,
+        instance_metadata_tags: DefaultInstanceMetadataTagsState = None,
+        dry_run: Boolean = None,
+        **kwargs,
+    ) -> ModifyInstanceMetadataDefaultsResult:
+        raise NotImplementedError
+
     @handler("ModifyInstanceMetadataOptions")
     def modify_instance_metadata_options(
         self,
@@ -24381,6 +24552,7 @@ class Ec2Api:
         ena_srd_specification: EnaSrdSpecification = None,
         enable_primary_ipv6: Boolean = None,
         connection_tracking_specification: ConnectionTrackingSpecificationRequest = None,
+        associate_public_ip_address: Boolean = None,
         **kwargs,
     ) -> None:
         raise NotImplementedError

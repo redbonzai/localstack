@@ -32,6 +32,7 @@ from localstack.aws.api.apigateway import (
     CreateAuthorizerRequest,
     CreateRestApiRequest,
     CreateStageRequest,
+    Deployment,
     DocumentationPart,
     DocumentationPartIds,
     DocumentationPartLocation,
@@ -246,6 +247,9 @@ class ApigatewayProvider(ApigatewayApi, ServiceLifecycleHook):
         rest_api = get_moto_rest_api(context, rest_api_id=result["id"])
         rest_api.version = request.get("version")
         response: RestApi = rest_api.to_dict()
+        # TODO: remove once this is fixed upstream
+        if "rootResourceId" not in response:
+            response["rootResourceId"] = get_moto_rest_api_root_resource(rest_api)
         remove_empty_attributes_from_rest_api(response)
         store = get_apigateway_store(context=context)
         rest_api_container = RestApiContainer(rest_api=response)
@@ -281,6 +285,10 @@ class ApigatewayProvider(ApigatewayApi, ServiceLifecycleHook):
     def get_rest_api(self, context: RequestContext, rest_api_id: String, **kwargs) -> RestApi:
         rest_api: RestApi = call_moto(context)
         remove_empty_attributes_from_rest_api(rest_api)
+        # TODO: remove once this is fixed upstream
+        if "rootResourceId" not in rest_api:
+            moto_rest_api = get_moto_rest_api(context, rest_api_id=rest_api_id)
+            rest_api["rootResourceId"] = get_moto_rest_api_root_resource(moto_rest_api)
         return rest_api
 
     def update_rest_api(
@@ -326,7 +334,7 @@ class ApigatewayProvider(ApigatewayApi, ServiceLifecycleHook):
             elif patch_op_path == "/minimumCompressionSize":
                 if patch_op["op"] != "replace":
                     raise BadRequestException(
-                        "Invalid patch operation specified. Must be 'add'|'remove'|'replace'"
+                        "Invalid patch operation specified. Must be one of: [replace]"
                     )
 
                 try:
@@ -358,6 +366,9 @@ class ApigatewayProvider(ApigatewayApi, ServiceLifecycleHook):
             rest_api.minimum_compression_size = None
 
         response = rest_api.to_dict()
+        if "rootResourceId" not in response:
+            response["rootResourceId"] = get_moto_rest_api_root_resource(rest_api)
+
         remove_empty_attributes_from_rest_api(response, remove_tags=False)
         store = get_apigateway_store(context=context)
         store.rest_apis[rest_api_id].rest_api = response
@@ -376,6 +387,9 @@ class ApigatewayProvider(ApigatewayApi, ServiceLifecycleHook):
         remove_empty_attributes_from_rest_api(response)
         store = get_apigateway_store(context=context)
         store.rest_apis[request["restApiId"]].rest_api = response
+        # TODO: remove once this is fixed upstream
+        if "rootResourceId" not in response:
+            response["rootResourceId"] = get_moto_rest_api_root_resource(rest_api)
         # TODO: verify this
         response = to_rest_api_response_json(response)
         response.setdefault("tags", {})
@@ -475,6 +489,9 @@ class ApigatewayProvider(ApigatewayApi, ServiceLifecycleHook):
         response: RestApis = call_moto(context)
         for rest_api in response["items"]:
             remove_empty_attributes_from_rest_api(rest_api)
+            if "rootResourceId" not in rest_api:
+                moto_rest_api = get_moto_rest_api(context, rest_api_id=rest_api["id"])
+                rest_api["rootResourceId"] = get_moto_rest_api_root_resource(moto_rest_api)
         return response
 
     # resources
@@ -807,7 +824,24 @@ class ApigatewayProvider(ApigatewayApi, ServiceLifecycleHook):
             # if the path is not supported by the operation, ignore it and skip
             op_supported_path = UPDATE_METHOD_PATCH_PATHS.get(op, [])
             if not any(path.startswith(s_path) for s_path in op_supported_path):
-                continue
+                available_ops = [
+                    available_op
+                    for available_op in ("add", "replace", "delete")
+                    if available_op != op
+                ]
+                supported_ops = ", ".join(
+                    [
+                        supported_op
+                        for supported_op in available_ops
+                        if any(
+                            path.startswith(s_path)
+                            for s_path in UPDATE_METHOD_PATCH_PATHS.get(supported_op, [])
+                        )
+                    ]
+                )
+                raise BadRequestException(
+                    f"Invalid patch operation specified. Must be one of: [{supported_ops}]"
+                )
 
             value = patch_operation.get("value")
             if op not in ("add", "replace"):
@@ -1030,6 +1064,32 @@ class ApigatewayProvider(ApigatewayApi, ServiceLifecycleHook):
         response.setdefault("tracingEnabled", False)
         if not response.get("variables"):
             response.pop("variables", None)
+
+    def update_deployment(
+        self,
+        context: RequestContext,
+        rest_api_id: String,
+        deployment_id: String,
+        patch_operations: ListOfPatchOperation = None,
+        **kwargs,
+    ) -> Deployment:
+        moto_rest_api = get_moto_rest_api(context, rest_api_id)
+        try:
+            deployment = moto_rest_api.get_deployment(deployment_id)
+        except KeyError:
+            raise NotFoundException("Invalid Deployment identifier specified")
+
+        for patch_operation in patch_operations:
+            # TODO: add validation for unsupported paths
+            # see https://docs.aws.amazon.com/apigateway/latest/api/patch-operations.html#UpdateDeployment-Patch
+            if (
+                patch_operation.get("path") == "/description"
+                and patch_operation.get("op") == "replace"
+            ):
+                deployment.description = patch_operation["value"]
+
+        deployment_response: Deployment = deployment.to_json() or {}
+        return deployment_response
 
     # authorizers
 
@@ -1863,6 +1923,36 @@ class ApigatewayProvider(ApigatewayApi, ServiceLifecycleHook):
 
         return response
 
+    def update_integration(
+        self,
+        context: RequestContext,
+        rest_api_id: String,
+        resource_id: String,
+        http_method: String,
+        patch_operations: ListOfPatchOperation = None,
+        **kwargs,
+    ) -> Integration:
+        moto_rest_api = get_moto_rest_api(context=context, rest_api_id=rest_api_id)
+        resource = moto_rest_api.resources.get(resource_id)
+        if not resource:
+            raise NotFoundException("Invalid Resource identifier specified")
+
+        method = resource.resource_methods.get(http_method)
+        if not method:
+            raise NotFoundException("Invalid Integration identifier specified")
+
+        integration = method.method_integration
+        _patch_api_gateway_entity(integration, patch_operations)
+
+        # fix data types
+        if integration.timeout_in_millis:
+            integration.timeout_in_millis = int(integration.timeout_in_millis)
+        if skip_verification := (integration.tls_config or {}).get("insecureSkipVerification"):
+            integration.tls_config["insecureSkipVerification"] = str_to_bool(skip_verification)
+
+        integration_dict: Integration = integration.to_json()
+        return integration_dict
+
     def delete_integration(
         self,
         context: RequestContext,
@@ -2510,6 +2600,13 @@ def validate_model_in_use(moto_rest_api: MotoRestAPI, model_name: str) -> None:
                 raise ConflictException(
                     f"Cannot delete model '{model_name}', is referenced in method request: {path}"
                 )
+
+
+def get_moto_rest_api_root_resource(moto_rest_api: MotoRestAPI) -> str:
+    for res_id, res_obj in moto_rest_api.resources.items():
+        if res_obj.path_part == "/" and not res_obj.parent_id:
+            return res_id
+    raise Exception(f"Unable to find root resource for API {moto_rest_api.id}")
 
 
 def create_custom_context(
