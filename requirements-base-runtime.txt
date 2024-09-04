@@ -27,7 +27,7 @@ cachetools==5.3.3
     # via localstack-core (pyproject.toml)
 cbor2==5.6.3
     # via localstack-core (pyproject.toml)
-certifi==2024.2.2
+certifi==2024.7.4
     # via requests
 cffi==1.16.0
     # via cryptography
@@ -40,7 +40,7 @@ click==8.1.7
     #   quart
 constantly==23.10.4
     # via localstack-twisted
-cryptography==42.0.7
+cryptography==43.0.1
     # via
     #   localstack-core (pyproject.toml)
     #   pyopenssl
@@ -140,7 +140,7 @@ quart==0.19.5
     # via localstack-core (pyproject.toml)
 readerwriterlock==1.0.9
     # via localstack-core (pyproject.toml)
-requests==2.31.0
+requests==2.32.2
     # via
     #   docker
     #   localstack-core (pyproject.toml)
@@ -166,7 +166,7 @@ typing-extensions==4.11.0
     # via
     #   localstack-twisted
     #   readerwriterlock
-urllib3==2.2.1
+urllib3==2.2.2
     # via
     #   botocore
     #   docker

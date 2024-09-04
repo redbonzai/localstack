@@ -82,7 +82,7 @@ cattrs==23.2.3
     # via jsii
 cbor2==5.6.3
     # via localstack-core
-certifi==2024.2.2
+certifi==2024.7.4
     # via
     #   httpcore
     #   httpx
@@ -110,7 +110,7 @@ coverage==7.5.1
     # via localstack-core (pyproject.toml)
 crontab==1.0.1
     # via localstack-core
-cryptography==42.0.7
+cryptography==43.0.1
     # via
     #   joserfc
     #   localstack-core
@@ -383,7 +383,7 @@ referencing==0.31.1
     #   jsonschema-specifications
 regex==2024.5.15
     # via cfn-lint
-requests==2.31.0
+requests==2.32.2
     # via
     #   docker
     #   jsonschema-path
@@ -458,7 +458,7 @@ typing-extensions==4.11.0
     #   pydantic
     #   pydantic-core
     #   readerwriterlock
-urllib3==2.2.1
+urllib3==2.2.2
     # via
     #   botocore
     #   docker
